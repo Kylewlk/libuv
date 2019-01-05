@@ -24,22 +24,11 @@
 #include <malloc.h>
 #include <stdio.h>
 #include <process.h>
-#if !defined(__MINGW32__)
-# include <crtdbg.h>
-#endif
+#include <crtdbg.h>
 
 
 #include "task.h"
 #include "runner.h"
-
-
-/*
- * Define the stuff that MinGW doesn't have
- */
-#ifndef GetFileSizeEx
-  WINBASEAPI BOOL WINAPI GetFileSizeEx(HANDLE hFile,
-                                       PLARGE_INTEGER lpFileSize);
-#endif
 
 
 /* Do platform-specific initialization. */
@@ -47,11 +36,11 @@ int platform_init(int argc, char **argv) {
   /* Disable the "application crashed" popup. */
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
       SEM_NOOPENFILEERRORBOX);
-#if !defined(__MINGW32__)
   _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_DEBUG);
   _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_DEBUG);
-#endif
 
+  /* make output mode sane */
+  _fmode = _O_BINARY;
   _setmode(0, _O_BINARY);
   _setmode(1, _O_BINARY);
   _setmode(2, _O_BINARY);
@@ -75,6 +64,11 @@ int process_start(char *name, char *part, process_info_t *p, int is_helper) {
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
   DWORD result;
+
+  if (!is_helper) {
+    /* Give the helpers time to settle. Race-y, fix this. */
+    uv_sleep(250);
+  }
 
   if (GetTempPathW(sizeof(path) / sizeof(WCHAR), (WCHAR*)&path) == 0)
     goto error;
@@ -165,8 +159,8 @@ error:
 }
 
 
-/* Timeout is is msecs. Set timeout < 0 to never time out. */
-/* Returns 0 when all processes are terminated, -2 on timeout. */
+/* Timeout is in msecs. Set timeout < 0 to never time out. Returns 0 when all
+ * processes are terminated, -2 on timeout. */
 int process_wait(process_info_t *vec, int n, int timeout) {
   int i;
   HANDLE handles[MAXIMUM_WAIT_OBJECTS];
@@ -209,22 +203,30 @@ long int process_output_size(process_info_t *p) {
 
 
 int process_copy_output(process_info_t* p, FILE* stream) {
-  DWORD read;
   char buf[1024];
+  int fd, r;
+  FILE* f;
 
-  if (SetFilePointer(p->stdio_out,
-                     0,
-                     0,
-                     FILE_BEGIN) == INVALID_SET_FILE_POINTER) {
+  fd = _open_osfhandle((intptr_t)p->stdio_out, _O_RDONLY | _O_TEXT);
+  if (fd == -1)
+    return -1;
+  f = _fdopen(fd, "rt");
+  if (f == NULL) {
+    _close(fd);
     return -1;
   }
 
-  while (ReadFile(p->stdio_out, &buf, sizeof(buf), &read, NULL) && read > 0)
-    print_lines(buf, read, stream);
-
-  if (GetLastError() != ERROR_HANDLE_EOF)
+  r = fseek(f, 0, SEEK_SET);
+  if (r < 0)
     return -1;
 
+  while (fgets(buf, sizeof(buf), f) != NULL)
+    print_lines(buf, strlen(buf), stream);
+
+  if (ferror(f))
+    return -1;
+
+  fclose(f);
   return 0;
 }
 
@@ -292,7 +294,6 @@ int process_reap(process_info_t *p) {
 void process_cleanup(process_info_t *p) {
   CloseHandle(p->process);
   CloseHandle(p->stdio_in);
-  CloseHandle(p->stdio_out);
 }
 
 

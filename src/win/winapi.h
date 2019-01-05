@@ -4076,8 +4076,8 @@
 # define STATUS_HASH_NOT_PRESENT ((NTSTATUS) 0xC000A101L)
 #endif
 
-/* This is not the NTSTATUS_FROM_WIN32 that the DDK provides, because the */
-/* DDK got it wrong! */
+/* This is not the NTSTATUS_FROM_WIN32 that the DDK provides, because the DDK
+ * got it wrong! */
 #ifdef NTSTATUS_FROM_WIN32
 # undef NTSTATUS_FROM_WIN32
 #endif
@@ -4104,6 +4104,10 @@
 # define JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE          0x00002000
 #endif
 
+#ifndef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+# define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x00000002
+#endif
+
 /* from winternl.h */
 typedef struct _UNICODE_STRING {
   USHORT Length;
@@ -4118,36 +4122,31 @@ typedef const UNICODE_STRING *PCUNICODE_STRING;
 # define DEVICE_TYPE DWORD
 #endif
 
-/* MinGW already has a definition for REPARSE_DATA_BUFFER, but mingw-w64 does
- * not.
- */
-#if defined(_MSC_VER) || defined(__MINGW64_VERSION_MAJOR)
-  typedef struct _REPARSE_DATA_BUFFER {
-    ULONG  ReparseTag;
-    USHORT ReparseDataLength;
-    USHORT Reserved;
-    union {
-      struct {
-        USHORT SubstituteNameOffset;
-        USHORT SubstituteNameLength;
-        USHORT PrintNameOffset;
-        USHORT PrintNameLength;
-        ULONG Flags;
-        WCHAR PathBuffer[1];
-      } SymbolicLinkReparseBuffer;
-      struct {
-        USHORT SubstituteNameOffset;
-        USHORT SubstituteNameLength;
-        USHORT PrintNameOffset;
-        USHORT PrintNameLength;
-        WCHAR PathBuffer[1];
-      } MountPointReparseBuffer;
-      struct {
-        UCHAR  DataBuffer[1];
-      } GenericReparseBuffer;
-    };
-  } REPARSE_DATA_BUFFER, *PREPARSE_DATA_BUFFER;
-#endif
+typedef struct _REPARSE_DATA_BUFFER {
+  ULONG  ReparseTag;
+  USHORT ReparseDataLength;
+  USHORT Reserved;
+  union {
+    struct {
+      USHORT SubstituteNameOffset;
+      USHORT SubstituteNameLength;
+      USHORT PrintNameOffset;
+      USHORT PrintNameLength;
+      ULONG Flags;
+      WCHAR PathBuffer[1];
+    } SymbolicLinkReparseBuffer;
+    struct {
+      USHORT SubstituteNameOffset;
+      USHORT SubstituteNameLength;
+      USHORT PrintNameOffset;
+      USHORT PrintNameLength;
+      WCHAR PathBuffer[1];
+    } MountPointReparseBuffer;
+    struct {
+      UCHAR  DataBuffer[1];
+    } GenericReparseBuffer;
+  };
+} REPARSE_DATA_BUFFER, *PREPARSE_DATA_BUFFER;
 
 typedef struct _IO_STATUS_BLOCK {
   union {
@@ -4583,15 +4582,6 @@ typedef NTSTATUS (NTAPI *sNtQueryDirectoryFile)
 # define SYMBOLIC_LINK_FLAG_DIRECTORY 0x1
 #endif
 
-#if defined(__MINGW32__) && !defined(__MINGW64_VERSION_MAJOR)
-  typedef struct _OVERLAPPED_ENTRY {
-      ULONG_PTR lpCompletionKey;
-      LPOVERLAPPED lpOverlapped;
-      ULONG_PTR Internal;
-      DWORD dwNumberOfBytesTransferred;
-  } OVERLAPPED_ENTRY, *LPOVERLAPPED_ENTRY;
-#endif
-
 /* from wincon.h */
 #ifndef ENABLE_INSERT_MODE
 # define ENABLE_INSERT_MODE 0x20
@@ -4646,48 +4636,6 @@ typedef BOOL (WINAPI *sGetQueuedCompletionStatusEx)
               DWORD dwMilliseconds,
               BOOL fAlertable);
 
-typedef BOOL (WINAPI* sSetFileCompletionNotificationModes)
-             (HANDLE FileHandle,
-              UCHAR Flags);
-
-typedef BOOLEAN (WINAPI* sCreateSymbolicLinkW)
-                (LPCWSTR lpSymlinkFileName,
-                 LPCWSTR lpTargetFileName,
-                 DWORD dwFlags);
-
-typedef BOOL (WINAPI* sCancelIoEx)
-             (HANDLE hFile,
-              LPOVERLAPPED lpOverlapped);
-
-typedef VOID (WINAPI* sInitializeConditionVariable)
-             (PCONDITION_VARIABLE ConditionVariable);
-
-typedef BOOL (WINAPI* sSleepConditionVariableCS)
-             (PCONDITION_VARIABLE ConditionVariable,
-              PCRITICAL_SECTION CriticalSection,
-              DWORD dwMilliseconds);
-
-typedef BOOL (WINAPI* sSleepConditionVariableSRW)
-             (PCONDITION_VARIABLE ConditionVariable,
-              PSRWLOCK SRWLock,
-              DWORD dwMilliseconds,
-              ULONG Flags);
-
-typedef VOID (WINAPI* sWakeAllConditionVariable)
-             (PCONDITION_VARIABLE ConditionVariable);
-
-typedef VOID (WINAPI* sWakeConditionVariable)
-             (PCONDITION_VARIABLE ConditionVariable);
-
-typedef BOOL (WINAPI* sCancelSynchronousIo)
-             (HANDLE hThread);
-
-typedef DWORD (WINAPI* sGetFinalPathNameByHandleW)
-             (HANDLE hFile,
-              LPWSTR lpszFilePath,
-              DWORD cchFilePath,
-              DWORD dwFlags);
-
 /* from powerbase.h */
 #ifndef DEVICE_NOTIFY_CALLBACK
 # define DEVICE_NOTIFY_CALLBACK 2
@@ -4721,6 +4669,25 @@ typedef DWORD (WINAPI *sPowerRegisterSuspendResumeNotification)
                HANDLE        Recipient,
                _PHPOWERNOTIFY RegistrationHandle);
 
+/* from Winuser.h */
+typedef VOID (CALLBACK* WINEVENTPROC)
+             (HWINEVENTHOOK hWinEventHook,
+              DWORD         event,
+              HWND          hwnd,
+              LONG          idObject,
+              LONG          idChild,
+              DWORD         idEventThread,
+              DWORD         dwmsEventTime);
+
+typedef HWINEVENTHOOK (WINAPI *sSetWinEventHook)
+                      (UINT         eventMin,
+                       UINT         eventMax,
+                       HMODULE      hmodWinEventProc,
+                       WINEVENTPROC lpfnWinEventProc,
+                       DWORD        idProcess,
+                       DWORD        idThread,
+                       UINT         dwflags);
+
 
 /* Ntdll function pointers */
 extern sRtlNtStatusToDosError pRtlNtStatusToDosError;
@@ -4731,22 +4698,13 @@ extern sNtQueryVolumeInformationFile pNtQueryVolumeInformationFile;
 extern sNtQueryDirectoryFile pNtQueryDirectoryFile;
 extern sNtQuerySystemInformation pNtQuerySystemInformation;
 
-
 /* Kernel32 function pointers */
 extern sGetQueuedCompletionStatusEx pGetQueuedCompletionStatusEx;
-extern sSetFileCompletionNotificationModes pSetFileCompletionNotificationModes;
-extern sCreateSymbolicLinkW pCreateSymbolicLinkW;
-extern sCancelIoEx pCancelIoEx;
-extern sInitializeConditionVariable pInitializeConditionVariable;
-extern sSleepConditionVariableCS pSleepConditionVariableCS;
-extern sSleepConditionVariableSRW pSleepConditionVariableSRW;
-extern sWakeAllConditionVariable pWakeAllConditionVariable;
-extern sWakeConditionVariable pWakeConditionVariable;
-extern sCancelSynchronousIo pCancelSynchronousIo;
-extern sGetFinalPathNameByHandleW pGetFinalPathNameByHandleW;
-
 
 /* Powrprof.dll function pointer */
 extern sPowerRegisterSuspendResumeNotification pPowerRegisterSuspendResumeNotification;
+
+/* User32.dll function pointer */
+extern sSetWinEventHook pSetWinEventHook;
 
 #endif /* UV_WIN_WINAPI_H_ */

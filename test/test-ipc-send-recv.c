@@ -25,7 +25,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* See test-ipc.ctx */
+/* See test-ipc.c */
 void spawn_helper(uv_pipe_t* channel,
                   uv_process_t* process,
                   const char* helper);
@@ -149,6 +149,7 @@ static void connect_cb(uv_connect_t* req, int status) {
                 &ctx.send.stream,
                 NULL);
   ASSERT(r == 0);
+  ASSERT(ctx.write_req.send_handle == &ctx.send.stream);
 
   /* Perform two writes to the same pipe to make sure that on Windows we are
    * not running into issue 505:
@@ -160,6 +161,7 @@ static void connect_cb(uv_connect_t* req, int status) {
                 &ctx.send2.stream,
                 NULL);
   ASSERT(r == 0);
+  ASSERT(ctx.write_req2.send_handle == &ctx.send2.stream);
 
   r = uv_read_start((uv_stream_t*)&ctx.channel, alloc_cb, recv_cb);
   ASSERT(r == 0);
@@ -224,10 +226,16 @@ static int run_ipc_send_recv_pipe(int inprocess) {
 }
 
 TEST_IMPL(ipc_send_recv_pipe) {
+#if defined(NO_SEND_HANDLE_ON_PIPE)
+  RETURN_SKIP(NO_SEND_HANDLE_ON_PIPE);
+#endif
   return run_ipc_send_recv_pipe(0);
 }
 
 TEST_IMPL(ipc_send_recv_pipe_inprocess) {
+#if defined(NO_SEND_HANDLE_ON_PIPE)
+  RETURN_SKIP(NO_SEND_HANDLE_ON_PIPE);
+#endif
   return run_ipc_send_recv_pipe(1);
 }
 
@@ -259,10 +267,16 @@ static int run_ipc_send_recv_tcp(int inprocess) {
 }
 
 TEST_IMPL(ipc_send_recv_tcp) {
+#if defined(NO_SEND_HANDLE_ON_PIPE)
+  RETURN_SKIP(NO_SEND_HANDLE_ON_PIPE);
+#endif
   return run_ipc_send_recv_tcp(0);
 }
 
 TEST_IMPL(ipc_send_recv_tcp_inprocess) {
+#if defined(NO_SEND_HANDLE_ON_PIPE)
+  RETURN_SKIP(NO_SEND_HANDLE_ON_PIPE);
+#endif
   return run_ipc_send_recv_tcp(1);
 }
 
@@ -292,7 +306,7 @@ static void read_cb(uv_stream_t* handle,
   union handles* recv;
   uv_write_t* write_req;
 
-  if (nread == UV__EOF || nread == UV__ECONNABORTED) {
+  if (nread == UV_EOF || nread == UV_ECONNABORTED) {
     return;
   }
 
@@ -332,10 +346,11 @@ static void read_cb(uv_stream_t* handle,
                   &recv->stream,
                   write2_cb);
     ASSERT(r == 0);
+    ASSERT(write_req->send_handle == &recv->stream);
   } while (uv_pipe_pending_count(pipe) > 0);
 }
 
-static void send_recv_start() {
+static void send_recv_start(void) {
   int r;
   ASSERT(1 == uv_is_readable((uv_stream_t*)&ctx2.channel));
   ASSERT(1 == uv_is_writable((uv_stream_t*)&ctx2.channel));
@@ -376,12 +391,14 @@ int run_ipc_send_recv_helper(uv_loop_t* loop, int inprocess) {
     r = uv_listen((uv_stream_t*)&ctx2.listen, SOMAXCONN, listen_cb);
     ASSERT(r == 0);
   } else {
-    r = uv_pipe_open(&ctx2.channel, 0);
+    uv_os_fd_t stdin_handle = uv_convert_fd_to_handle(0);
+    r = uv_pipe_open(&ctx2.channel, stdin_handle);
     ASSERT(r == 0);
 
     send_recv_start();
   }
 
+  notify_parent_process();
   r = uv_run(loop, UV_RUN_DEFAULT);
   ASSERT(r == 0);
 

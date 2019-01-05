@@ -82,8 +82,7 @@ static void cl_recv_cb(uv_udp_t* handle,
   }
 
   if (nread == 0) {
-    /* Returning unused buffer */
-    /* Don't count towards cl_recv_cb_called */
+    /* Returning unused buffer. Don't count towards cl_recv_cb_called */
     ASSERT(addr == NULL);
     return;
   }
@@ -121,13 +120,21 @@ TEST_IMPL(udp_multicast_join6) {
   /* join the multicast channel */
 #if defined(__APPLE__)          || \
     defined(_AIX)               || \
-    defined(__MVS__)            || \
-    defined(__FreeBSD_kernel__)
+    defined(__FreeBSD_kernel__) || \
+    defined(__NetBSD__)         || \
+    defined(__OpenBSD__)
   r = uv_udp_set_membership(&client, "ff02::1", "::1%lo0", UV_JOIN_GROUP);
+#elif defined(__MVS__)
+  r = uv_udp_set_membership(&client, "ff02::1", "::1%LOOPBACK6", UV_JOIN_GROUP);
 #else
   r = uv_udp_set_membership(&client, "ff02::1", NULL, UV_JOIN_GROUP);
 #endif
+
+#if defined(__MVS__)
+  if (r == UV_EADDRNOTAVAIL) {
+#else
   if (r == UV_ENODEV) {
+#endif
     MAKE_VALGRIND_HAPPY();
     RETURN_SKIP("No ipv6 multicast route");
   }

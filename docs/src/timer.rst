@@ -45,15 +45,17 @@ API
     .. note::
         Does not update the event loop's concept of "now". See :c:func:`uv_update_time` for more information.
 
+        If the timer is already active, it is simply updated.
+
 .. c:function:: int uv_timer_stop(uv_timer_t* handle)
 
     Stop the timer, the callback will not be called anymore.
 
 .. c:function:: int uv_timer_again(uv_timer_t* handle)
 
-    Stop the timer, and if it is repeating restart it using the repeat value
-    as the timeout. If the timer has never been started before it returns
-    UV_EINVAL.
+    Stop the timer and restart it using the repeat value as the timeout. If the
+    timer has never been started before, or the timer is not a repeating timer,
+    it returns `UV_EINVAL`.
 
 .. c:function:: void uv_timer_set_repeat(uv_timer_t* handle, uint64_t repeat)
 

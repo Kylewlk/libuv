@@ -59,6 +59,45 @@ Threads
 
     .. versionchanged:: 1.4.1 returns a UV_E* error code on failure
 
+.. c:function:: int uv_thread_setaffinity(uv_thread_t* tid, char* cpumask, char* oldmask, size_t mask_size)
+
+    Sets the specified thread's affinity to cpumask, which is specified in
+    bytes. Optionally returning the previous affinity setting in oldmask.
+    On Unix, uses :man:`pthread_getaffinity_np(3)` to get the affinity setting
+    and maps the cpu_set_t to bytes in oldmask. Then maps the bytes in cpumask
+    to a cpu_set_t and uses :man:`pthread_setaffinity_np(3)`. On Windows, maps
+    the bytes in cpumask to a bitmask and uses SetThreadAffinityMask() which
+    returns the previous affinity setting.
+
+    The mask_size specifies the number of entries (bytes) in cpumask / oldmask,
+    and must be greater-than-or-equal-to :c:func:`uv_cpumask_size`.
+
+    .. note::
+        Thread affinity setting is not atomic on Windows. Unsupported on macOS.
+
+    .. versionadded:: 2.0.0
+
+.. c:function:: int uv_thread_getaffinity(uv_thread_t* tid, char* cpumask, size_t mask_size)
+
+    Gets the specified thread's affinity setting. On Unix, this maps the
+    cpu_set_t returned by :man:`pthread_getaffinity_np(3)` to bytes in cpumask.
+
+    The mask_size specifies the number of entries (bytes) in cpumask,
+    and must be greater-than-or-equal-to :c:func:`uv_cpumask_size`.
+
+    .. note::
+        Thread affinity getting is not atomic on Windows. Unsupported on macOS.
+
+    .. versionadded:: 2.0.0
+
+.. c:function:: int uv_thread_detach(uv_thread_t* tid)
+
+   Detaches the specified thread so it will be cleaned up on exit automatically;
+   joining it is no longer necessary (or possible).
+   Uses :man:`pthread_detach(3)` on Unix and CloseHandle() on Windows.
+
+    .. versionadded:: 2.0.0
+
 .. c:function:: uv_thread_t uv_thread_self(void)
 .. c:function:: int uv_thread_join(uv_thread_t *tid)
 .. c:function:: int uv_thread_equal(const uv_thread_t* t1, const uv_thread_t* t2)
@@ -91,6 +130,7 @@ Functions return 0 on success or an error code < 0 (unless the
 return type is void, of course).
 
 .. c:function:: int uv_mutex_init(uv_mutex_t* handle)
+.. c:function:: int uv_mutex_init_recursive(uv_mutex_t* handle)
 .. c:function:: void uv_mutex_destroy(uv_mutex_t* handle)
 .. c:function:: void uv_mutex_lock(uv_mutex_t* handle)
 .. c:function:: int uv_mutex_trylock(uv_mutex_t* handle)
@@ -130,8 +170,15 @@ Functions return 0 on success or an error code < 0 (unless the
 return type is void, of course).
 
 .. note::
-    Callers should be prepared to deal with spurious wakeups on :c:func:`uv_cond_wait` and
-    :c:func:`uv_cond_timedwait`.
+    1. Callers should be prepared to deal with spurious wakeups on :c:func:`uv_cond_wait`
+       and :c:func:`uv_cond_timedwait`.
+    2. The timeout parameter for :c:func:`uv_cond_timedwait` is relative to the time
+       at which function is called.
+    3. On z/OS, the timeout parameter for :c:func:`uv_cond_timedwait` is converted to an
+       absolute system time at which the wait expires. If the current system clock time
+       passes the absolute time calculated before the condition is signaled, an ETIMEDOUT
+       error results. After the wait begins, the wait time is not affected by changes
+       to the system clock.
 
 .. c:function:: int uv_cond_init(uv_cond_t* cond)
 .. c:function:: void uv_cond_destroy(uv_cond_t* cond)

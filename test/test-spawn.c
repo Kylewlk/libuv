@@ -1,3 +1,4 @@
+
 /* Copyright Joyent, Inc. and other Node contributors. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -36,6 +37,12 @@
 #else
 # include <unistd.h>
 # include <sys/wait.h>
+# include <sched.h>
+# if defined(__FreeBSD__)
+#  include <sys/param.h>
+#  include <sys/cpuset.h>
+#  include <pthread_np.h>
+# endif
 #endif
 
 
@@ -49,6 +56,7 @@ static size_t exepath_size = 1024;
 static char* args[5];
 static int no_term_signal;
 static int timer_counter;
+static uv_tcp_t tcp_server;
 
 #define OUTPUT_SIZE 1024
 static char output[OUTPUT_SIZE];
@@ -90,7 +98,16 @@ static void kill_cb(uv_process_t* process,
 #else
   ASSERT(exit_status == 0);
 #endif
-  ASSERT(no_term_signal || term_signal == 15);
+#if defined(__APPLE__) || defined(__MVS__)
+  /*
+   * At least starting with Darwin Kernel Version 16.4.0, sending a SIGTERM to a
+   * process that is still starting up kills it with SIGKILL instead of SIGTERM.
+   * See: https://github.com/libuv/libuv/issues/1226
+   */
+  ASSERT(no_term_signal || term_signal == SIGTERM || term_signal == SIGKILL);
+#else
+  ASSERT(no_term_signal || term_signal == SIGTERM);
+#endif
   uv_close((uv_handle_t*)process, close_cb);
 
   /*
@@ -269,7 +286,7 @@ TEST_IMPL(spawn_stdout) {
 
 TEST_IMPL(spawn_stdout_to_file) {
   int r;
-  uv_file file;
+  uv_os_fd_t file;
   uv_fs_t fs_req;
   uv_stdio_container_t stdio[2];
   uv_buf_t buf;
@@ -281,15 +298,14 @@ TEST_IMPL(spawn_stdout_to_file) {
 
   r = uv_fs_open(NULL, &fs_req, "stdout_file", O_CREAT | O_RDWR,
       S_IRUSR | S_IWUSR, NULL);
-  ASSERT(r != -1);
+  ASSERT(r == 0);
+  file = (uv_os_fd_t)fs_req.result;
   uv_fs_req_cleanup(&fs_req);
-
-  file = r;
 
   options.stdio = stdio;
   options.stdio[0].flags = UV_IGNORE;
   options.stdio[1].flags = UV_INHERIT_FD;
-  options.stdio[1].data.fd = file;
+  options.stdio[1].data.file = file;
   options.stdio_count = 2;
 
   r = uv_spawn(uv_default_loop(), &process, &options);
@@ -323,7 +339,7 @@ TEST_IMPL(spawn_stdout_to_file) {
 
 TEST_IMPL(spawn_stdout_and_stderr_to_file) {
   int r;
-  uv_file file;
+  uv_os_fd_t file;
   uv_fs_t fs_req;
   uv_stdio_container_t stdio[3];
   uv_buf_t buf;
@@ -335,17 +351,16 @@ TEST_IMPL(spawn_stdout_and_stderr_to_file) {
 
   r = uv_fs_open(NULL, &fs_req, "stdout_file", O_CREAT | O_RDWR,
       S_IRUSR | S_IWUSR, NULL);
-  ASSERT(r != -1);
+  ASSERT(r == 0);
+  file = (uv_os_fd_t)fs_req.result;
   uv_fs_req_cleanup(&fs_req);
-
-  file = r;
 
   options.stdio = stdio;
   options.stdio[0].flags = UV_IGNORE;
   options.stdio[1].flags = UV_INHERIT_FD;
-  options.stdio[1].data.fd = file;
+  options.stdio[1].data.file = file;
   options.stdio[2].flags = UV_INHERIT_FD;
-  options.stdio[2].data.fd = file;
+  options.stdio[2].data.file = file;
   options.stdio_count = 3;
 
   r = uv_spawn(uv_default_loop(), &process, &options);
@@ -380,7 +395,7 @@ TEST_IMPL(spawn_stdout_and_stderr_to_file) {
 TEST_IMPL(spawn_stdout_and_stderr_to_file2) {
 #ifndef _WIN32
   int r;
-  uv_file file;
+  uv_os_fd_t file;
   uv_fs_t fs_req;
   uv_stdio_container_t stdio[3];
   uv_buf_t buf;
@@ -397,17 +412,18 @@ TEST_IMPL(spawn_stdout_and_stderr_to_file2) {
                  O_CREAT | O_RDWR,
                  S_IRUSR | S_IWUSR,
                  NULL);
-  ASSERT(r != -1);
+  ASSERT(r == 0);
+  file = (uv_os_fd_t)fs_req.result;
   uv_fs_req_cleanup(&fs_req);
-  file = dup2(r, STDERR_FILENO);
+  file = dup2(file, STDERR_FILENO);
   ASSERT(file != -1);
 
   options.stdio = stdio;
   options.stdio[0].flags = UV_IGNORE;
   options.stdio[1].flags = UV_INHERIT_FD;
-  options.stdio[1].data.fd = file;
+  options.stdio[1].data.file = file;
   options.stdio[2].flags = UV_INHERIT_FD;
-  options.stdio[2].data.fd = file;
+  options.stdio[2].data.file = file;
   options.stdio_count = 3;
 
   r = uv_spawn(uv_default_loop(), &process, &options);
@@ -445,8 +461,8 @@ TEST_IMPL(spawn_stdout_and_stderr_to_file2) {
 TEST_IMPL(spawn_stdout_and_stderr_to_file_swap) {
 #ifndef _WIN32
   int r;
-  uv_file stdout_file;
-  uv_file stderr_file;
+  uv_os_fd_t stdout_file;
+  uv_os_fd_t stderr_file;
   uv_fs_t fs_req;
   uv_stdio_container_t stdio[3];
   uv_buf_t buf;
@@ -464,17 +480,19 @@ TEST_IMPL(spawn_stdout_and_stderr_to_file_swap) {
                  O_CREAT | O_RDWR,
                  S_IRUSR | S_IWUSR,
                  NULL);
-  ASSERT(r != -1);
+  ASSERT(r == 0);
+  stdout_file = (uv_os_fd_t)fs_req.result;
   uv_fs_req_cleanup(&fs_req);
-  stdout_file = dup2(r, STDOUT_FILENO);
+  stdout_file = dup2(stdout_file, STDOUT_FILENO);
   ASSERT(stdout_file != -1);
 
   /* open 'stderr_file' and replace STDERR_FILENO with it */
   r = uv_fs_open(NULL, &fs_req, "stderr_file", O_CREAT | O_RDWR,
       S_IRUSR | S_IWUSR, NULL);
-  ASSERT(r != -1);
+  ASSERT(r == 0);
+  stderr_file = (uv_os_fd_t)fs_req.result;
   uv_fs_req_cleanup(&fs_req);
-  stderr_file = dup2(r, STDERR_FILENO);
+  stderr_file = dup2(stderr_file, STDERR_FILENO);
   ASSERT(stderr_file != -1);
 
   /* now we're going to swap them: the child process' stdout will be our
@@ -482,9 +500,9 @@ TEST_IMPL(spawn_stdout_and_stderr_to_file_swap) {
   options.stdio = stdio;
   options.stdio[0].flags = UV_IGNORE;
   options.stdio[1].flags = UV_INHERIT_FD;
-  options.stdio[1].data.fd = stderr_file;
+  options.stdio[1].data.file = stderr_file;
   options.stdio[2].flags = UV_INHERIT_FD;
-  options.stdio[2].data.fd = stdout_file;
+  options.stdio[2].data.file = stdout_file;
   options.stdio_count = 3;
 
   r = uv_spawn(uv_default_loop(), &process, &options);
@@ -612,6 +630,74 @@ TEST_IMPL(spawn_stdio_greater_than_3) {
 }
 
 
+int spawn_tcp_server_helper(void) {
+  uv_tcp_t tcp;
+  uv_os_sock_t handle;
+  int r;
+
+  r = uv_tcp_init(uv_default_loop(), &tcp);
+  ASSERT(r == 0);
+
+#ifdef _WIN32
+  handle = _get_osfhandle(3);
+#else
+  handle = 3;
+#endif
+  r = uv_tcp_open(&tcp, handle);
+  ASSERT(r == 0);
+
+  /* Make sure that we can listen on a socket that was
+   * passed down from the parent process
+   */
+  r = uv_listen((uv_stream_t*)&tcp, SOMAXCONN, NULL);
+  ASSERT(r == 0);
+
+  return 1;
+}
+
+
+TEST_IMPL(spawn_tcp_server) {
+  uv_stdio_container_t stdio[4];
+  struct sockaddr_in addr;
+  uv_os_fd_t fd;
+  int r;
+
+  init_process_options("spawn_tcp_server_helper", exit_cb);
+
+  ASSERT(0 == uv_ip4_addr("127.0.0.1", TEST_PORT, &addr));
+
+  r = uv_tcp_init_ex(uv_default_loop(), &tcp_server, AF_INET);
+  ASSERT(r == 0);
+  r = uv_tcp_bind(&tcp_server, (const struct sockaddr*) &addr, 0);
+  ASSERT(r == 0);
+  r = uv_fileno((uv_handle_t*)&tcp_server, &fd);
+  ASSERT(r == 0);
+
+  options.stdio = stdio;
+  options.stdio[0].flags = UV_INHERIT_FD;
+  options.stdio[0].data.file = uv_get_osfhandle(0);
+  options.stdio[1].flags = UV_INHERIT_FD;
+  options.stdio[1].data.file = uv_get_osfhandle(1);
+  options.stdio[2].flags = UV_INHERIT_FD;
+  options.stdio[2].data.file = uv_get_osfhandle(2);
+  options.stdio[3].flags = UV_INHERIT_FD;
+  options.stdio[3].data.file = fd;
+  options.stdio_count = 4;
+
+  r = uv_spawn(uv_default_loop(), &process, &options);
+  ASSERT(r == 0);
+
+  r = uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+  ASSERT(r == 0);
+
+  ASSERT(exit_cb_called == 1);
+  ASSERT(close_cb_called == 1);
+
+  MAKE_VALGRIND_HAPPY();
+  return 0;
+}
+
+
 TEST_IMPL(spawn_ignored_stdio) {
   int r;
 
@@ -715,6 +801,8 @@ TEST_IMPL(spawn_detached) {
   ASSERT(r == 0);
 
   ASSERT(exit_cb_called == 0);
+
+  ASSERT(process.pid == uv_process_get_pid(&process));
 
   r = uv_kill(process.pid, 0);
   ASSERT(r == 0);
@@ -920,8 +1008,29 @@ TEST_IMPL(kill) {
 
   init_process_options("spawn_helper4", kill_cb);
 
+  /* Verify that uv_spawn() resets the signal disposition. */
+#ifndef _WIN32
+  {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGTERM);
+    ASSERT(0 == pthread_sigmask(SIG_BLOCK, &set, NULL));
+  }
+  ASSERT(SIG_ERR != signal(SIGTERM, SIG_IGN));
+#endif
+
   r = uv_spawn(uv_default_loop(), &process, &options);
   ASSERT(r == 0);
+
+#ifndef _WIN32
+  {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGTERM);
+    ASSERT(0 == pthread_sigmask(SIG_UNBLOCK, &set, NULL));
+  }
+  ASSERT(SIG_ERR != signal(SIGTERM, SIG_DFL));
+#endif
 
   /* Sending signum == 0 should check if the
    * child process is still alive, not kill it.
@@ -1060,6 +1169,7 @@ TEST_IMPL(argument_escaping) {
   for (i = 0; i < count; ++i) {
     free(test_output[i]);
   }
+  free(test_output);
 
   result = make_program_args(verbatim, 1, &verbatim_output);
   ASSERT(result == 0);
@@ -1180,11 +1290,8 @@ TEST_IMPL(environment_creation) {
         found = 1;
       }
     }
-    if (prev) { /* verify sort order -- requires Vista */
-#if _WIN32_WINNT >= 0x0600 && \
-    (!defined(__MINGW32__) || defined(__MINGW64_VERSION_MAJOR))
+    if (prev) { /* verify sort order  */
       ASSERT(CompareStringOrdinal(prev, -1, str, -1, TRUE) == 1);
-#endif
     }
     ASSERT(found); /* verify that we expected this variable */
   }
@@ -1288,7 +1395,11 @@ TEST_IMPL(spawn_setuid_fails) {
   options.uid = 0;
 
   r = uv_spawn(uv_default_loop(), &process, &options);
+#if defined(__CYGWIN__)
+  ASSERT(r == UV_EINVAL);
+#else
   ASSERT(r == UV_EPERM);
+#endif
 
   r = uv_run(uv_default_loop(), UV_RUN_DEFAULT);
   ASSERT(r == 0);
@@ -1316,10 +1427,18 @@ TEST_IMPL(spawn_setgid_fails) {
   init_process_options("spawn_helper1", fail_cb);
 
   options.flags |= UV_PROCESS_SETGID;
+#if defined(__MVS__)
+  options.gid = -1;
+#else
   options.gid = 0;
+#endif
 
   r = uv_spawn(uv_default_loop(), &process, &options);
+#if defined(__CYGWIN__) || defined(__MVS__)
+  ASSERT(r == UV_EINVAL);
+#else
   ASSERT(r == UV_EPERM);
+#endif
 
   r = uv_run(uv_default_loop(), UV_RUN_DEFAULT);
   ASSERT(r == 0);
@@ -1331,6 +1450,109 @@ TEST_IMPL(spawn_setgid_fails) {
 }
 #endif
 
+TEST_IMPL(spawn_affinity) {
+#if defined(NO_CPU_AFFINITY)
+  RETURN_SKIP(NO_CPU_AFFINITY);
+#else
+  int i;
+  int r;
+  int cpu;
+  char cpustr[11];
+  char* newmask;
+  int cpumask_size;
+#if defined(_WIN32)
+  DWORD_PTR procmask;
+  DWORD_PTR sysmask;
+#elif defined(__linux__)
+  cpu_set_t cpuset;
+#else
+  cpuset_t cpuset;
+#endif
+
+  cpumask_size = uv_cpumask_size();
+  ASSERT(cpumask_size > 0);
+
+  /* find a cpu we can use */
+  cpu = cpumask_size;
+#ifdef _WIN32
+  r = GetProcessAffinityMask(GetCurrentProcess(), &procmask, &sysmask);
+  ASSERT(r != 0);
+  for (i = 0; i < cpumask_size; ++i) {
+    if (procmask & (((DWORD_PTR)1) << i)) {
+      cpu = i;
+      break;
+    }
+  }
+#else
+  CPU_ZERO(&cpuset);
+  r = pthread_getaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+  ASSERT(r == 0);
+  for (i = 0; i < cpumask_size; ++i) {
+    if (CPU_ISSET(i, &cpuset)) {
+      cpu = i;
+      break;
+    }
+  }
+#endif
+  ASSERT(cpu < cpumask_size);
+  snprintf(cpustr, sizeof(cpustr), "%d", cpu);
+
+  init_process_options("spawn_helper_affinity", exit_cb);
+
+  /* mask the child to just one cpu */
+  newmask = (char*)calloc(cpumask_size, 1);
+  ASSERT(newmask != NULL);
+  newmask[cpu] = 1;
+  options.cpumask_size = (size_t)cpumask_size;
+  options.cpumask = newmask;
+
+  /* tell the child which one it should get */
+  options.args[2] = cpustr;
+  options.args[3] = "dummy"; /* need 4 args for test/run-tests.c dispatch */
+
+  r = uv_spawn(uv_default_loop(), &process, &options);
+  ASSERT(r == 0);
+
+  r = uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+  ASSERT(r == 0);
+
+  ASSERT(exit_cb_called == 1);
+  ASSERT(close_cb_called == 1);
+
+  free(newmask);
+
+  MAKE_VALGRIND_HAPPY();
+  return 0;
+#endif
+}
+
+TEST_IMPL(spawn_affinity_invalid_mask) {
+#if defined(NO_CPU_AFFINITY)
+  RETURN_SKIP(NO_CPU_AFFINITY);
+#else
+  int r;
+  char newmask[1];
+  int cpumask_size;
+
+  cpumask_size = uv_cpumask_size();
+  ASSERT(cpumask_size > 0);
+
+  init_process_options("", exit_cb);
+
+  /* provide a mask that is too small */
+  newmask[0] = 0;
+  options.cpumask_size = 0;
+  options.cpumask = newmask;
+
+  r = uv_spawn(uv_default_loop(), &process, &options);
+  ASSERT(r == UV_EINVAL);
+
+  ASSERT(exit_cb_called == 0);
+
+  MAKE_VALGRIND_HAPPY();
+  return 0;
+#endif
+}
 
 #ifdef _WIN32
 
@@ -1399,15 +1621,16 @@ TEST_IMPL(spawn_auto_unref) {
 
 #ifndef _WIN32
 TEST_IMPL(spawn_fs_open) {
-  int fd;
+  int r, fd;
   uv_fs_t fs_req;
   uv_pipe_t in;
   uv_write_t write_req;
   uv_buf_t buf;
   uv_stdio_container_t stdio[1];
 
-  fd = uv_fs_open(NULL, &fs_req, "/dev/null", O_RDWR, 0, NULL);
-  ASSERT(fd >= 0);
+  r = uv_fs_open(NULL, &fs_req, "/dev/null", O_RDWR, 0, NULL);
+  ASSERT(r == 0);
+  fd = (uv_os_fd_t)fs_req.result;
   uv_fs_req_cleanup(&fs_req);
 
   init_process_options("spawn_helper8", exit_cb);
@@ -1438,9 +1661,6 @@ TEST_IMPL(spawn_fs_open) {
 
 #ifndef _WIN32
 TEST_IMPL(closed_fd_events) {
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
-#endif
   uv_stdio_container_t stdio[3];
   uv_pipe_t pipe_handle;
   int fd[2];
@@ -1453,7 +1673,7 @@ TEST_IMPL(closed_fd_events) {
   options.stdio_count = 3;
   options.stdio = stdio;
   options.stdio[0].flags = UV_INHERIT_FD;
-  options.stdio[0].data.fd = fd[0];
+  options.stdio[0].data.file = fd[0];
   options.stdio[1].flags = UV_IGNORE;
   options.stdio[2].flags = UV_IGNORE;
 
@@ -1516,8 +1736,8 @@ TEST_IMPL(spawn_reads_child_path) {
   static const char dyld_path_var[] = "LD_LIBRARY_PATH";
 #endif
 
-  /* Set up the process, but make sure that the file to run is relative and */
-  /* requires a lookup into PATH */
+  /* Set up the process, but make sure that the file to run is relative and
+   * requires a lookup into PATH. */
   init_process_options("spawn_helper1", exit_cb);
 
   /* Set up the PATH env variable */
@@ -1528,6 +1748,17 @@ TEST_IMPL(spawn_reads_child_path) {
   exepath[len] = 0;
   strcpy(path, "PATH=");
   strcpy(path + 5, exepath);
+#if defined(__CYGWIN__) || defined(__MSYS__)
+  /* Carry over the dynamic linker path in case the test runner
+     is linked against cyguv-1.dll or msys-uv-1.dll, see above.  */
+  {
+    char* syspath = getenv("PATH");
+    if (syspath != NULL) {
+      strcat(path, ":");
+      strcat(path, syspath);
+    }
+  }
+#endif
 
   env[0] = path;
   env[1] = getenv(dyld_path_var);
@@ -1557,7 +1788,7 @@ TEST_IMPL(spawn_reads_child_path) {
 }
 
 #ifndef _WIN32
-static int mpipe(int *fds) {
+static int mpipe(int fds[2]) {
   if (pipe(fds) == -1)
     return -1;
   if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) == -1 ||
@@ -1569,21 +1800,13 @@ static int mpipe(int *fds) {
   return 0;
 }
 #else
-static int mpipe(int *fds) {
+static int mpipe(HANDLE fds[2]) {
   SECURITY_ATTRIBUTES attr;
-  HANDLE readh, writeh;
   attr.nLength = sizeof(attr);
   attr.lpSecurityDescriptor = NULL;
   attr.bInheritHandle = FALSE;
-  if (!CreatePipe(&readh, &writeh, &attr, 0))
+  if (!CreatePipe(&fds[0], &fds[1], &attr, 0))
     return -1;
-  fds[0] = _open_osfhandle((intptr_t)readh, 0);
-  fds[1] = _open_osfhandle((intptr_t)writeh, 0);
-  if (fds[0] == -1 || fds[1] == -1) {
-    CloseHandle(readh);
-    CloseHandle(writeh);
-    return -1;
-  }
   return 0;
 }
 #endif /* !_WIN32 */
@@ -1591,8 +1814,8 @@ static int mpipe(int *fds) {
 TEST_IMPL(spawn_inherit_streams) {
   uv_process_t child_req;
   uv_stdio_container_t child_stdio[2];
-  int fds_stdin[2];
-  int fds_stdout[2];
+  uv_os_fd_t fds_stdin[2];
+  uv_os_fd_t fds_stdout[2];
   uv_pipe_t pipe_stdin_child;
   uv_pipe_t pipe_stdout_child;
   uv_pipe_t pipe_stdin_parent;
@@ -1601,6 +1824,7 @@ TEST_IMPL(spawn_inherit_streams) {
   uv_buf_t buf;
   unsigned int i;
   int r;
+  int bidir;
   uv_write_t write_req;
   uv_loop_t* loop;
 
@@ -1619,6 +1843,15 @@ TEST_IMPL(spawn_inherit_streams) {
   ASSERT(uv_pipe_open(&pipe_stdout_child, fds_stdout[1]) == 0);
   ASSERT(uv_pipe_open(&pipe_stdin_parent, fds_stdin[1]) == 0);
   ASSERT(uv_pipe_open(&pipe_stdout_parent, fds_stdout[0]) == 0);
+  ASSERT(uv_is_readable((uv_stream_t*) &pipe_stdin_child));
+  ASSERT(uv_is_writable((uv_stream_t*) &pipe_stdout_child));
+  ASSERT(uv_is_writable((uv_stream_t*) &pipe_stdin_parent));
+  ASSERT(uv_is_readable((uv_stream_t*) &pipe_stdout_parent));
+  /* Some systems (SVR4) open a bidirectional pipe, most don't. */
+  bidir = uv_is_writable((uv_stream_t*) &pipe_stdin_child);
+  ASSERT(uv_is_readable((uv_stream_t*) &pipe_stdout_child) == bidir);
+  ASSERT(uv_is_readable((uv_stream_t*) &pipe_stdin_parent) == bidir);
+  ASSERT(uv_is_writable((uv_stream_t*) &pipe_stdout_parent) == bidir);
 
   child_stdio[0].flags = UV_INHERIT_STREAM;
   child_stdio[0].data.stream = (uv_stream_t *)&pipe_stdin_child;
@@ -1660,6 +1893,31 @@ TEST_IMPL(spawn_inherit_streams) {
 
   MAKE_VALGRIND_HAPPY();
   return 0;
+}
+
+TEST_IMPL(spawn_quoted_path) {
+#ifndef _WIN32
+  RETURN_SKIP("Test for Windows");
+#else
+  char* quoted_path_env[2];
+  args[0] = "not_existing";
+  args[1] = NULL;
+  options.file = args[0];
+  options.args = args;
+  options.exit_cb = exit_cb;
+  options.flags = 0;
+  /* We test if search_path works correctly with semicolons in quoted path. We
+   * will use an invalid drive, so we are sure no executable is spawned. */
+  quoted_path_env[0] = "PATH=\"xyz:\\test;\";xyz:\\other";
+  quoted_path_env[1] = NULL;
+  options.env = quoted_path_env;
+
+  /* We test if libuv will not segfault. */
+  uv_spawn(uv_default_loop(), &process, &options);
+
+  MAKE_VALGRIND_HAPPY();
+  return 0;
+#endif
 }
 
 /* Helper for child process of spawn_inherit_streams */

@@ -79,12 +79,12 @@ static void create_dir(const char* name) {
 
 static void create_file(const char* name) {
   int r;
-  uv_file file;
+  uv_os_fd_t file;
   uv_fs_t req;
 
   r = uv_fs_open(NULL, &req, name, O_WRONLY | O_CREAT, S_IWUSR | S_IRUSR, NULL);
-  ASSERT(r >= 0);
-  file = r;
+  ASSERT(r == 0);
+  file = (uv_os_fd_t)req.result;
   uv_fs_req_cleanup(&req);
   r = uv_fs_close(NULL, &req, file, NULL);
   ASSERT(r == 0);
@@ -93,13 +93,13 @@ static void create_file(const char* name) {
 
 static void touch_file(const char* name) {
   int r;
-  uv_file file;
+  uv_os_fd_t file;
   uv_fs_t req;
   uv_buf_t buf;
 
   r = uv_fs_open(NULL, &req, name, O_RDWR, 0, NULL);
-  ASSERT(r >= 0);
-  file = r;
+  ASSERT(r == 0);
+  file = (uv_os_fd_t)req.result;
   uv_fs_req_cleanup(&req);
 
   buf = uv_buf_init("foo", 4);
@@ -129,7 +129,7 @@ static void fs_event_cb_dir(uv_fs_event_t* handle, const char* filename,
   ++fs_event_cb_called;
   ASSERT(handle == &fs_event);
   ASSERT(status == 0);
-  ASSERT(events == UV_RENAME);
+  ASSERT(events == UV_CHANGE);
   #if defined(__APPLE__) || defined(_WIN32) || defined(__linux__)
   ASSERT(strcmp(filename, "file1") == 0);
   #else
@@ -199,7 +199,7 @@ static void fs_event_cb_dir_multi_file(uv_fs_event_t* handle,
   fs_event_cb_called++;
   ASSERT(handle == &fs_event);
   ASSERT(status == 0);
-  ASSERT(events == UV_CHANGE || UV_RENAME);
+  ASSERT(events == UV_CHANGE || events == UV_RENAME);
   #if defined(__APPLE__) || defined(_WIN32) || defined(__linux__)
   ASSERT(strncmp(filename, file_prefix, sizeof(file_prefix) - 1) == 0);
   #else
@@ -283,7 +283,7 @@ static void fs_event_cb_dir_multi_file_in_subdir(uv_fs_event_t* handle,
   fs_event_cb_called++;
   ASSERT(handle == &fs_event);
   ASSERT(status == 0);
-  ASSERT(events == UV_CHANGE || UV_RENAME);
+  ASSERT(events == UV_CHANGE || events == UV_RENAME);
   #if defined(__APPLE__) || defined(_WIN32) || defined(__linux__)
   ASSERT(strncmp(filename,
                  file_prefix_in_subdir,
@@ -394,8 +394,10 @@ static void timer_cb_watch_twice(uv_timer_t* handle) {
 }
 
 TEST_IMPL(fs_event_watch_dir) {
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
+#elif defined(__MVS__)
+  RETURN_SKIP("Directory watching not supported on this platform.");
 #endif
 
   uv_loop_t* loop = uv_default_loop();
@@ -475,10 +477,46 @@ TEST_IMPL(fs_event_watch_dir_recursive) {
 #endif
 }
 
+#ifdef _WIN32
+TEST_IMPL(fs_event_watch_dir_short_path) {
+  uv_loop_t* loop;
+  int r;
+
+  /* Setup */
+  loop = uv_default_loop();
+  remove("watch_dir/file1");
+  remove("watch_dir/");
+  create_dir("watch_dir");
+  create_file("watch_dir/file1");
+
+  r = uv_fs_event_init(loop, &fs_event);
+  ASSERT(r == 0);
+  r = uv_fs_event_start(&fs_event, fs_event_cb_dir, "watch_~1", 0);
+  ASSERT(r == 0);
+  r = uv_timer_init(loop, &timer);
+  ASSERT(r == 0);
+  r = uv_timer_start(&timer, timer_cb_file, 100, 0);
+  ASSERT(r == 0);
+
+  uv_run(loop, UV_RUN_DEFAULT);
+
+  ASSERT(fs_event_cb_called == 1);
+  ASSERT(timer_cb_called == 1);
+  ASSERT(close_cb_called == 1);
+
+  /* Cleanup */
+  remove("watch_dir/file1");
+  remove("watch_dir/");
+
+  MAKE_VALGRIND_HAPPY();
+  return 0;
+}
+#endif
+
 
 TEST_IMPL(fs_event_watch_file) {
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
 #endif
 
   uv_loop_t* loop = uv_default_loop();
@@ -522,8 +560,8 @@ TEST_IMPL(fs_event_watch_file_exact_path) {
     "file.js". The test verifies that no events occur for file.jsx.
   */
 
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
 #endif
 
   uv_loop_t* loop;
@@ -561,8 +599,8 @@ TEST_IMPL(fs_event_watch_file_exact_path) {
 }
 
 TEST_IMPL(fs_event_watch_file_twice) {
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
 #endif
   const char path[] = "test/fixtures/empty_file";
   uv_fs_event_t watchers[2];
@@ -585,8 +623,8 @@ TEST_IMPL(fs_event_watch_file_twice) {
 }
 
 TEST_IMPL(fs_event_watch_file_current_dir) {
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
 #endif
   uv_timer_t timer;
   uv_loop_t* loop;
@@ -658,8 +696,8 @@ TEST_IMPL(fs_event_watch_file_root_dir) {
 #endif
 
 TEST_IMPL(fs_event_no_callback_after_close) {
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
 #endif
 
   uv_loop_t* loop = uv_default_loop();
@@ -696,8 +734,8 @@ TEST_IMPL(fs_event_no_callback_after_close) {
 }
 
 TEST_IMPL(fs_event_no_callback_on_close) {
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
 #endif
 
   uv_loop_t* loop = uv_default_loop();
@@ -747,8 +785,8 @@ static void timer_cb(uv_timer_t* handle) {
 
 
 TEST_IMPL(fs_event_immediate_close) {
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
 #endif
   uv_timer_t timer;
   uv_loop_t* loop;
@@ -772,8 +810,8 @@ TEST_IMPL(fs_event_immediate_close) {
 
 
 TEST_IMPL(fs_event_close_with_pending_event) {
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
 #endif
   uv_loop_t* loop;
   int r;
@@ -818,8 +856,10 @@ static void fs_event_cb_close(uv_fs_event_t* handle, const char* filename,
 }
 
 TEST_IMPL(fs_event_close_in_callback) {
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
+#elif defined(__MVS__)
+  RETURN_SKIP("Directory watching not supported on this platform.");
 #endif
   uv_loop_t* loop;
   int r;
@@ -857,8 +897,8 @@ TEST_IMPL(fs_event_close_in_callback) {
 }
 
 TEST_IMPL(fs_event_start_and_close) {
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
 #endif
   uv_loop_t* loop;
   uv_fs_event_t fs_event1;
@@ -892,8 +932,8 @@ TEST_IMPL(fs_event_start_and_close) {
 }
 
 TEST_IMPL(fs_event_getpath) {
-#if defined(__MVS__)
-  RETURN_SKIP("Filesystem watching not supported on this platform.");
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
 #endif
   uv_loop_t* loop = uv_default_loop();
   int r;
@@ -1027,3 +1067,21 @@ TEST_IMPL(fs_event_error_reporting) {
 }
 
 #endif  /* defined(__APPLE__) */
+
+TEST_IMPL(fs_event_watch_invalid_path) {
+#if defined(NO_FS_EVENTS)
+  RETURN_SKIP(NO_FS_EVENTS);
+#endif
+
+  uv_loop_t* loop;
+  int r;
+
+  loop = uv_default_loop();
+  r = uv_fs_event_init(loop, &fs_event);
+  ASSERT(r == 0);
+  r = uv_fs_event_start(&fs_event, fs_event_cb_file, "<:;", 0);
+  ASSERT(r != 0);
+  ASSERT(uv_is_active((uv_handle_t*) &fs_event) == 0);
+  MAKE_VALGRIND_HAPPY();
+  return 0;
+}

@@ -58,8 +58,8 @@ static void repeat_1_cb(uv_timer_t* handle) {
 
   if (repeat_1_cb_called == 10) {
     uv_close((uv_handle_t*)handle, close_cb);
-    /* We're not calling uv_timer_again on repeat_2 any more, so after this */
-    /* timer_2_cb is expected. */
+    /* We're not calling uv_timer_again on repeat_2 any more, so after this
+     * timer_2_cb is expected. */
     repeat_2_cb_allowed = 1;
     return;
   }
@@ -111,6 +111,10 @@ TEST_IMPL(timer_again) {
   r = uv_timer_start(&repeat_1, repeat_1_cb, 50, 0);
   ASSERT(r == 0);
   ASSERT(uv_timer_get_repeat(&repeat_1) == 0);
+
+  /* Verify that it is not possible to uv_timer_again a non-repeating timer. */
+  r = uv_timer_again(&repeat_1);
+  ASSERT(r == UV_EINVAL);
 
   /* Actually make repeat_1 repeating. */
   uv_timer_set_repeat(&repeat_1, 50);

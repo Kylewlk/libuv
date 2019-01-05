@@ -20,9 +20,7 @@
  */
 
 #include <assert.h>
-#include <errno.h>
-#include <stdio.h>
-#include <string.h>
+#include <stdio.h> /* printf */
 
 #include "uv.h"
 #include "internal.h"
@@ -69,6 +67,7 @@ static void uv_relative_path(const WCHAR* filename,
   size_t relpathlen;
   size_t filenamelen = wcslen(filename);
   size_t dirlen = wcslen(dir);
+  assert(!_wcsnicmp(filename, dir, dirlen));
   if (dirlen > 0 && dir[dirlen - 1] == '\\')
     dirlen--;
   relpathlen = filenamelen - dirlen - 1;
@@ -81,8 +80,17 @@ static void uv_relative_path(const WCHAR* filename,
 
 static int uv_split_path(const WCHAR* filename, WCHAR** dir,
     WCHAR** file) {
-  int len = wcslen(filename);
-  int i = len;
+  size_t len, i;
+
+  if (filename == NULL) {
+    if (dir != NULL)
+      *dir = NULL;
+    *file = NULL;
+    return 0;
+  }
+
+  len = wcslen(filename);
+  i = len;
   while (i > 0 && filename[--i] != '\\' && filename[i] != '/');
 
   if (i == 0) {
@@ -131,8 +139,7 @@ int uv_fs_event_init(uv_loop_t* loop, uv_fs_event_t* handle) {
   handle->short_filew = NULL;
   handle->dirw = NULL;
 
-  uv_req_init(loop, (uv_req_t*)&handle->req);
-  handle->req.type = UV_FS_EVENT_REQ;
+  UV_REQ_INIT(&handle->req, UV_FS_EVENT_REQ);
   handle->req.data = handle;
 
   return 0;
@@ -143,10 +150,11 @@ int uv_fs_event_start(uv_fs_event_t* handle,
                       uv_fs_event_cb cb,
                       const char* path,
                       unsigned int flags) {
-  int name_size, is_path_dir;
+  int name_size, is_path_dir, size;
   DWORD attr, last_error;
   WCHAR* dir = NULL, *dir_to_watch, *pathw = NULL;
-  WCHAR short_path[MAX_PATH];
+  WCHAR short_path_buffer[MAX_PATH];
+  WCHAR* short_path, *long_path;
 
   if (uv__is_active(handle))
     return UV_EINVAL;
@@ -188,6 +196,30 @@ int uv_fs_event_start(uv_fs_event_t* handle,
 
   if (is_path_dir) {
      /* path is a directory, so that's the directory that we will watch. */
+
+    /* Convert to long path. */
+    size = GetLongPathNameW(pathw, NULL, 0);
+
+    if (size) {
+      long_path = (WCHAR*)uv__malloc(size * sizeof(WCHAR));
+      if (!long_path) {
+        uv_fatal_error(ERROR_OUTOFMEMORY, "uv__malloc");
+      }
+
+      size = GetLongPathNameW(pathw, long_path, size);
+      if (size) {
+        long_path[size] = '\0';
+      } else {
+        uv__free(long_path);
+        long_path = NULL;
+      }
+    }
+
+    if (long_path) {
+      uv__free(pathw);
+      pathw = long_path;
+    }
+
     dir_to_watch = pathw;
   } else {
     /*
@@ -196,9 +228,9 @@ int uv_fs_event_start(uv_fs_event_t* handle,
      */
 
     /* Convert to short path. */
+    short_path = short_path_buffer;
     if (!GetShortPathNameW(pathw, short_path, ARRAY_SIZE(short_path))) {
-      last_error = GetLastError();
-      goto error;
+      short_path = NULL;
     }
 
     if (uv_split_path(pathw, &dir, &handle->filew) != 0) {
@@ -306,6 +338,9 @@ error:
     handle->buffer = NULL;
   }
 
+  if (uv__is_active(handle))
+    uv__handle_stop(handle);
+
   return uv_translate_sys_error(last_error);
 }
 
@@ -345,8 +380,11 @@ int uv_fs_event_stop(uv_fs_event_t* handle) {
 }
 
 
-static int file_info_cmp(WCHAR* str, WCHAR* file_name, int file_name_len) {
-  int str_len;
+static int file_info_cmp(WCHAR* str, WCHAR* file_name, size_t file_name_len) {
+  size_t str_len;
+
+  if (str == NULL)
+    return -1;
 
   str_len = wcslen(str);
 
@@ -379,7 +417,7 @@ void uv_process_fs_event_req(uv_loop_t* loop, uv_req_t* req,
    * - We are not active, just ignore the callback
    */
   if (!uv__is_active(handle)) {
-    if (handle->flags & UV__HANDLE_CLOSING) {
+    if (handle->flags & UV_HANDLE_CLOSING) {
       uv_want_endgame(loop, (uv_handle_t*) handle);
     }
     return;
@@ -503,7 +541,7 @@ void uv_process_fs_event_req(uv_loop_t* loop, uv_req_t* req,
         }
 
         offset = file_info->NextEntryOffset;
-      } while (offset && !(handle->flags & UV__HANDLE_CLOSING));
+      } while (offset && !(handle->flags & UV_HANDLE_CLOSING));
     } else {
       handle->cb(handle, NULL, UV_CHANGE, 0);
     }
@@ -512,7 +550,7 @@ void uv_process_fs_event_req(uv_loop_t* loop, uv_req_t* req,
     handle->cb(handle, NULL, 0, uv_translate_sys_error(err));
   }
 
-  if (!(handle->flags & UV__HANDLE_CLOSING)) {
+  if (!(handle->flags & UV_HANDLE_CLOSING)) {
     uv_fs_event_queue_readdirchanges(loop, handle);
   } else {
     uv_want_endgame(loop, (uv_handle_t*)handle);
@@ -533,7 +571,7 @@ void uv_fs_event_close(uv_loop_t* loop, uv_fs_event_t* handle) {
 
 
 void uv_fs_event_endgame(uv_loop_t* loop, uv_fs_event_t* handle) {
-  if ((handle->flags & UV__HANDLE_CLOSING) && !handle->req_pending) {
+  if ((handle->flags & UV_HANDLE_CLOSING) && !handle->req_pending) {
     assert(!(handle->flags & UV_HANDLE_CLOSED));
 
     if (handle->buffer) {

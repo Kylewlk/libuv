@@ -22,9 +22,6 @@
 #include <assert.h>
 #include <direct.h>
 #include <limits.h>
-#include <stdio.h>
-#include <string.h>
-#include <time.h>
 #include <wchar.h>
 
 #include "uv.h"
@@ -37,6 +34,10 @@
 #include <tlhelp32.h>
 #include <windows.h>
 #include <userenv.h>
+#include <math.h>
+
+#define SECURITY_WIN32
+#include <security.h>
 
 
 /*
@@ -59,13 +60,20 @@
 # define UNLEN 256
 #endif
 
+/*
+  Max hostname length. The Windows gethostname() documentation states that 256
+  bytes will always be large enough to hold the null-terminated hostname.
+*/
+#ifndef MAXHOSTNAMELEN
+# define MAXHOSTNAMELEN 256
+#endif
+
+/* Maximum environment variable size, including the terminating null */
+#define MAX_ENV_VAR_LENGTH 32767
+
 /* Cached copy of the process title, plus a mutex guarding it. */
 static char *process_title;
 static CRITICAL_SECTION process_title_lock;
-
-/* Cached copy of the process id, written once. */
-static DWORD current_pid = 0;
-
 
 /* Interval (in seconds) of the high-resolution clock. */
 static double hrtime_interval_ = 0;
@@ -74,7 +82,7 @@ static double hrtime_interval_ = 0;
 /*
  * One-time initialization code for functionality defined in util.c.
  */
-void uv__util_init() {
+void uv__util_init(void) {
   LARGE_INTEGER perf_frequency;
 
   /* Initialize process title access mutex. */
@@ -138,8 +146,8 @@ int uv_exepath(char* buffer, size_t* size_ptr) {
 
   uv__free(utf16_buffer);
 
-  /* utf8_len *does* include the terminating null at this point, but the */
-  /* returned size shouldn't. */
+  /* utf8_len *does* include the terminating null at this point, but the
+   * returned size shouldn't. */
   *size_ptr = utf8_len - 1;
   return 0;
 
@@ -162,16 +170,16 @@ int uv_cwd(char* buffer, size_t* size) {
   if (utf16_len == 0) {
     return uv_translate_sys_error(GetLastError());
   } else if (utf16_len > MAX_PATH) {
-    /* This should be impossible;  however the CRT has a code path to deal */
-    /* with this scenario, so I added a check anyway. */
+    /* This should be impossible; however the CRT has a code path to deal with
+     * this scenario, so I added a check anyway. */
     return UV_EIO;
   }
 
   /* utf16_len contains the length, *not* including the terminating null. */
   utf16_buffer[utf16_len] = L'\0';
 
-  /* The returned directory should not have a trailing slash, unless it */
-  /* points at a drive root, like c:\. Remove it if needed.*/
+  /* The returned directory should not have a trailing slash, unless it points
+   * at a drive root, like c:\. Remove it if needed. */
   if (utf16_buffer[utf16_len - 1] == L'\\' &&
       !(utf16_len == 3 && utf16_buffer[1] == L':')) {
     utf16_len--;
@@ -228,9 +236,9 @@ int uv_chdir(const char* dir) {
                           utf16_buffer,
                           MAX_PATH) == 0) {
     DWORD error = GetLastError();
-    /* The maximum length of the current working directory is 260 chars, */
-    /* including terminating null. If it doesn't fit, the path name must be */
-    /* too long. */
+    /* The maximum length of the current working directory is 260 chars,
+     * including terminating null. If it doesn't fit, the path name must be too
+     * long. */
     if (error == ERROR_INSUFFICIENT_BUFFER) {
       return UV_ENAMETOOLONG;
     } else {
@@ -242,9 +250,9 @@ int uv_chdir(const char* dir) {
     return uv_translate_sys_error(GetLastError());
   }
 
-  /* Windows stores the drive-local path in an "hidden" environment variable, */
-  /* which has the form "=C:=C:\Windows". SetCurrentDirectory does not */
-  /* update this, so we'll have to do it. */
+  /* Windows stores the drive-local path in an "hidden" environment variable,
+   * which has the form "=C:=C:\Windows". SetCurrentDirectory does not update
+   * this, so we'll have to do it. */
   utf16_len = GetCurrentDirectoryW(MAX_PATH, utf16_buffer);
   if (utf16_len == 0) {
     return uv_translate_sys_error(GetLastError());
@@ -252,8 +260,8 @@ int uv_chdir(const char* dir) {
     return UV_EIO;
   }
 
-  /* The returned directory should not have a trailing slash, unless it */
-  /* points at a drive root, like c:\. Remove it if needed. */
+  /* The returned directory should not have a trailing slash, unless it points
+   * at a drive root, like c:\. Remove it if needed. */
   if (utf16_buffer[utf16_len - 1] == L'\\' &&
       !(utf16_len == 3 && utf16_buffer[1] == L':')) {
     utf16_len--;
@@ -261,8 +269,8 @@ int uv_chdir(const char* dir) {
   }
 
   if (utf16_len < 2 || utf16_buffer[1] != L':') {
-    /* Doesn't look like a drive letter could be there - probably an UNC */
-    /* path. TODO: Need to handle win32 namespaces like \\?\C:\ ? */
+    /* Doesn't look like a drive letter could be there - probably an UNC path.
+     * TODO: Need to handle win32 namespaces like \\?\C:\ ? */
     drive_letter = 0;
   } else if (utf16_buffer[0] >= L'A' && utf16_buffer[0] <= L'Z') {
     drive_letter = utf16_buffer[0];
@@ -320,7 +328,12 @@ uint64_t uv_get_total_memory(void) {
 }
 
 
-int uv_parent_pid() {
+uv_pid_t uv_os_getpid(void) {
+  return GetCurrentProcessId();
+}
+
+
+uv_pid_t uv_os_getppid(void) {
   int parent_pid = -1;
   HANDLE handle;
   PROCESSENTRY32 pe;
@@ -340,14 +353,6 @@ int uv_parent_pid() {
 
   CloseHandle(handle);
   return parent_pid;
-}
-
-
-int uv_current_pid() {
-  if (current_pid == 0) {
-    current_pid = GetCurrentProcessId();
-  }
-  return current_pid;
 }
 
 
@@ -405,7 +410,7 @@ done:
 }
 
 
-static int uv__get_process_title() {
+static int uv__get_process_title(void) {
   WCHAR title_w[MAX_TITLE_LENGTH];
 
   if (!GetConsoleTitleW(title_w, sizeof(title_w) / sizeof(WCHAR))) {
@@ -571,8 +576,8 @@ int uv_uptime(double* uptime) {
         BYTE* address = (BYTE*) object_type + object_type->DefinitionLength +
                         counter_definition->CounterOffset;
         uint64_t value = *((uint64_t*) address);
-        *uptime = (double) (object_type->PerfTime.QuadPart - value) /
-                  (double) object_type->PerfFreq.QuadPart;
+        *uptime = floor((double) (object_type->PerfTime.QuadPart - value) /
+                        (double) object_type->PerfFreq.QuadPart);
         uv__free(malloced_buffer);
         return 0;
       }
@@ -599,7 +604,7 @@ int uv_cpu_info(uv_cpu_info_t** cpu_infos_ptr, int* cpu_count_ptr) {
   SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION* sppi;
   DWORD sppi_size;
   SYSTEM_INFO system_info;
-  DWORD cpu_count, r, i;
+  DWORD cpu_count, i;
   NTSTATUS status;
   ULONG result_size;
   int err;
@@ -654,34 +659,33 @@ int uv_cpu_info(uv_cpu_info_t** cpu_infos_ptr, int* cpu_count_ptr) {
 
     assert(len > 0 && len < ARRAY_SIZE(key_name));
 
-    r = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                      key_name,
-                      0,
-                      KEY_QUERY_VALUE,
-                      &processor_key);
-    if (r != ERROR_SUCCESS) {
-      err = GetLastError();
+    err = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                        key_name,
+                        0,
+                        KEY_QUERY_VALUE,
+                        &processor_key);
+    if (err != ERROR_SUCCESS) {
       goto error;
     }
 
-    if (RegQueryValueExW(processor_key,
-                         L"~MHz",
-                         NULL,
-                         NULL,
-                         (BYTE*) &cpu_speed,
-                         &cpu_speed_size) != ERROR_SUCCESS) {
-      err = GetLastError();
+    err = RegQueryValueExW(processor_key,
+                           L"~MHz",
+                           NULL,
+                           NULL,
+                           (BYTE*)&cpu_speed,
+                           &cpu_speed_size);
+    if (err != ERROR_SUCCESS) {
       RegCloseKey(processor_key);
       goto error;
     }
 
-    if (RegQueryValueExW(processor_key,
-                         L"ProcessorNameString",
-                         NULL,
-                         NULL,
-                         (BYTE*) &cpu_brand,
-                         &cpu_brand_size) != ERROR_SUCCESS) {
-      err = GetLastError();
+    err = RegQueryValueExW(processor_key,
+                           L"ProcessorNameString",
+                           NULL,
+                           NULL,
+                           (BYTE*)&cpu_brand,
+                           &cpu_brand_size);
+    if (err != ERROR_SUCCESS) {
       RegCloseKey(processor_key);
       goto error;
     }
@@ -732,71 +736,6 @@ void uv_free_cpu_info(uv_cpu_info_t* cpu_infos, int count) {
 }
 
 
-static int is_windows_version_or_greater(DWORD os_major,
-                                         DWORD os_minor,
-                                         WORD service_pack_major,
-                                         WORD service_pack_minor) {
-  OSVERSIONINFOEX osvi;
-  DWORDLONG condition_mask = 0;
-  int op = VER_GREATER_EQUAL;
-
-  /* Initialize the OSVERSIONINFOEX structure. */
-  ZeroMemory(&osvi, sizeof(OSVERSIONINFOEX));
-  osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
-  osvi.dwMajorVersion = os_major;
-  osvi.dwMinorVersion = os_minor;
-  osvi.wServicePackMajor = service_pack_major;
-  osvi.wServicePackMinor = service_pack_minor;
-
-  /* Initialize the condition mask. */
-  VER_SET_CONDITION(condition_mask, VER_MAJORVERSION, op);
-  VER_SET_CONDITION(condition_mask, VER_MINORVERSION, op);
-  VER_SET_CONDITION(condition_mask, VER_SERVICEPACKMAJOR, op);
-  VER_SET_CONDITION(condition_mask, VER_SERVICEPACKMINOR, op);
-
-  /* Perform the test. */
-  return (int) VerifyVersionInfo(
-    &osvi,
-    VER_MAJORVERSION | VER_MINORVERSION |
-    VER_SERVICEPACKMAJOR | VER_SERVICEPACKMINOR,
-    condition_mask);
-}
-
-
-static int address_prefix_match(int family,
-                                struct sockaddr* address,
-                                struct sockaddr* prefix_address,
-                                int prefix_len) {
-  uint8_t* address_data;
-  uint8_t* prefix_address_data;
-  int i;
-
-  assert(address->sa_family == family);
-  assert(prefix_address->sa_family == family);
-
-  if (family == AF_INET6) {
-    address_data = (uint8_t*) &(((struct sockaddr_in6 *) address)->sin6_addr);
-    prefix_address_data =
-      (uint8_t*) &(((struct sockaddr_in6 *) prefix_address)->sin6_addr);
-  } else {
-    address_data = (uint8_t*) &(((struct sockaddr_in *) address)->sin_addr);
-    prefix_address_data =
-      (uint8_t*) &(((struct sockaddr_in *) prefix_address)->sin_addr);
-  }
-
-  for (i = 0; i < prefix_len >> 3; i++) {
-    if (address_data[i] != prefix_address_data[i])
-      return 0;
-  }
-
-  if (prefix_len % 8)
-    return prefix_address_data[i] ==
-      (address_data[i] & (0xff << (8 - prefix_len % 8)));
-
-  return 1;
-}
-
-
 int uv_interface_addresses(uv_interface_address_t** addresses_ptr,
     int* count_ptr) {
   IP_ADAPTER_ADDRESSES* win_address_buf;
@@ -809,35 +748,26 @@ int uv_interface_addresses(uv_interface_address_t** addresses_ptr,
   uv_interface_address_t* uv_address;
 
   int count;
-
-  int is_vista_or_greater;
   ULONG flags;
 
-  is_vista_or_greater = is_windows_version_or_greater(6, 0, 0, 0);
-  if (is_vista_or_greater) {
-    flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-      GAA_FLAG_SKIP_DNS_SERVER;
-  } else {
-    /* We need at least XP SP1. */
-    if (!is_windows_version_or_greater(5, 1, 1, 0))
-      return UV_ENOTSUP;
+  *addresses_ptr = NULL;
+  *count_ptr = 0;
 
-    flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-      GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_INCLUDE_PREFIX;
-  }
+  flags = GAA_FLAG_SKIP_ANYCAST |
+          GAA_FLAG_SKIP_MULTICAST |
+          GAA_FLAG_SKIP_DNS_SERVER;
 
-
-  /* Fetch the size of the adapters reported by windows, and then get the */
-  /* list itself. */
+  /* Fetch the size of the adapters reported by windows, and then get the list
+   * itself. */
   win_address_buf_size = 0;
   win_address_buf = NULL;
 
   for (;;) {
     ULONG r;
 
-    /* If win_address_buf is 0, then GetAdaptersAddresses will fail with */
-    /* ERROR_BUFFER_OVERFLOW, and the required buffer size will be stored in */
-    /* win_address_buf_size. */
+    /* If win_address_buf is 0, then GetAdaptersAddresses will fail with.
+     * ERROR_BUFFER_OVERFLOW, and the required buffer size will be stored in
+     * win_address_buf_size. */
     r = GetAdaptersAddresses(AF_UNSPEC,
                              flags,
                              NULL,
@@ -851,8 +781,8 @@ int uv_interface_addresses(uv_interface_address_t** addresses_ptr,
 
     switch (r) {
       case ERROR_BUFFER_OVERFLOW:
-        /* This happens when win_address_buf is NULL or too small to hold */
-        /* all adapters. */
+        /* This happens when win_address_buf is NULL or too small to hold all
+         * adapters. */
         win_address_buf = uv__malloc(win_address_buf_size);
         if (win_address_buf == NULL)
           return UV_ENOMEM;
@@ -886,15 +816,15 @@ int uv_interface_addresses(uv_interface_address_t** addresses_ptr,
         return UV_ENOBUFS;
 
       default:
-        /* Other (unspecified) errors can happen, but we don't have any */
-        /* special meaning for them. */
+        /* Other (unspecified) errors can happen, but we don't have any special
+         * meaning for them. */
         assert(r != ERROR_SUCCESS);
         return uv_translate_sys_error(r);
     }
   }
 
-  /* Count the number of enabled interfaces and compute how much space is */
-  /* needed to store their info. */
+  /* Count the number of enabled interfaces and compute how much space is
+   * needed to store their info. */
   count = 0;
   uv_address_buf_size = 0;
 
@@ -904,9 +834,9 @@ int uv_interface_addresses(uv_interface_address_t** addresses_ptr,
     IP_ADAPTER_UNICAST_ADDRESS* unicast_address;
     int name_size;
 
-    /* Interfaces that are not 'up' should not be reported. Also skip */
-    /* interfaces that have no associated unicast address, as to avoid */
-    /* allocating space for the name for this interface. */
+    /* Interfaces that are not 'up' should not be reported. Also skip
+     * interfaces that have no associated unicast address, as to avoid
+     * allocating space for the name for this interface. */
     if (adapter->OperStatus != IfOperStatusUp ||
         adapter->FirstUnicastAddress == NULL)
       continue;
@@ -926,8 +856,8 @@ int uv_interface_addresses(uv_interface_address_t** addresses_ptr,
     }
     uv_address_buf_size += name_size;
 
-    /* Count the number of addresses associated with this interface, and */
-    /* compute the size. */
+    /* Count the number of addresses associated with this interface, and
+     * compute the size. */
     for (unicast_address = (IP_ADAPTER_UNICAST_ADDRESS*)
                            adapter->FirstUnicastAddress;
          unicast_address != NULL;
@@ -944,8 +874,8 @@ int uv_interface_addresses(uv_interface_address_t** addresses_ptr,
     return UV_ENOMEM;
   }
 
-  /* Compute the start of the uv_interface_address_t array, and the place in */
-  /* the buffer where the interface names will be stored. */
+  /* Compute the start of the uv_interface_address_t array, and the place in
+   * the buffer where the interface names will be stored. */
   uv_address = uv_address_buf;
   name_buf = (char*) (uv_address_buf + count);
 
@@ -989,37 +919,8 @@ int uv_interface_addresses(uv_interface_address_t** addresses_ptr,
 
       sa = unicast_address->Address.lpSockaddr;
 
-      /* XP has no OnLinkPrefixLength field. */
-      if (is_vista_or_greater) {
-        prefix_len =
-          ((IP_ADAPTER_UNICAST_ADDRESS_LH*) unicast_address)->OnLinkPrefixLength;
-      } else {
-        /* Prior to Windows Vista the FirstPrefix pointed to the list with
-         * single prefix for each IP address assigned to the adapter.
-         * Order of FirstPrefix does not match order of FirstUnicastAddress,
-         * so we need to find corresponding prefix.
-         */
-        IP_ADAPTER_PREFIX* prefix;
-        prefix_len = 0;
-
-        for (prefix = adapter->FirstPrefix; prefix; prefix = prefix->Next) {
-          /* We want the longest matching prefix. */
-          if (prefix->Address.lpSockaddr->sa_family != sa->sa_family ||
-              prefix->PrefixLength <= prefix_len)
-            continue;
-
-          if (address_prefix_match(sa->sa_family, sa,
-              prefix->Address.lpSockaddr, prefix->PrefixLength)) {
-            prefix_len = prefix->PrefixLength;
-          }
-        }
-
-        /* If there is no matching prefix information, return a single-host
-         * subnet mask (e.g. 255.255.255.255 for IPv4).
-         */
-        if (!prefix_len)
-          prefix_len = (sa->sa_family == AF_INET6) ? 128 : 32;
-      }
+      prefix_len =
+        ((IP_ADAPTER_UNICAST_ADDRESS_LH*) unicast_address)->OnLinkPrefixLength;
 
       memset(uv_address, 0, sizeof *uv_address);
 
@@ -1132,53 +1033,17 @@ int uv_getrusage(uv_rusage_t *uv_rusage) {
 
 int uv_os_homedir(char* buffer, size_t* size) {
   uv_passwd_t pwd;
-  wchar_t path[MAX_PATH];
-  DWORD bufsize;
   size_t len;
   int r;
 
-  if (buffer == NULL || size == NULL || *size == 0)
-    return UV_EINVAL;
+  /* Check if the USERPROFILE environment variable is set first. The task of
+     performing input validation on buffer and size is taken care of by
+     uv_os_getenv(). */
+  r = uv_os_getenv("USERPROFILE", buffer, size);
 
-  /* Check if the USERPROFILE environment variable is set first */
-  len = GetEnvironmentVariableW(L"USERPROFILE", path, MAX_PATH);
-
-  if (len == 0) {
-    r = GetLastError();
-
-    /* Don't return an error if USERPROFILE was not found */
-    if (r != ERROR_ENVVAR_NOT_FOUND)
-      return uv_translate_sys_error(r);
-  } else if (len > MAX_PATH) {
-    /* This should not be possible */
-    return UV_EIO;
-  } else {
-    /* Check how much space we need */
-    bufsize = WideCharToMultiByte(CP_UTF8, 0, path, -1, NULL, 0, NULL, NULL);
-
-    if (bufsize == 0) {
-      return uv_translate_sys_error(GetLastError());
-    } else if (bufsize > *size) {
-      *size = bufsize;
-      return UV_ENOBUFS;
-    }
-
-    /* Convert to UTF-8 */
-    bufsize = WideCharToMultiByte(CP_UTF8,
-                                  0,
-                                  path,
-                                  -1,
-                                  buffer,
-                                  *size,
-                                  NULL,
-                                  NULL);
-
-    if (bufsize == 0)
-      return uv_translate_sys_error(GetLastError());
-
-    *size = bufsize - 1;
-    return 0;
-  }
+  /* Don't return an error if USERPROFILE was not found. */
+  if (r != UV_ENOENT)
+    return r;
 
   /* USERPROFILE is not set, so call uv__getpwuid_r() */
   r = uv__getpwuid_r(&pwd);
@@ -1220,8 +1085,8 @@ int uv_os_tmpdir(char* buffer, size_t* size) {
     return UV_EIO;
   }
 
-  /* The returned directory should not have a trailing slash, unless it */
-  /* points at a drive root, like c:\. Remove it if needed.*/
+  /* The returned directory should not have a trailing slash, unless it points
+   * at a drive root, like c:\. Remove it if needed. */
   if (path[len - 1] == L'\\' &&
       !(len == 3 && path[1] == L':')) {
     len--;
@@ -1262,8 +1127,10 @@ void uv_os_free_passwd(uv_passwd_t* pwd) {
 
   uv__free(pwd->username);
   uv__free(pwd->homedir);
+  uv__free(pwd->gecos);
   pwd->username = NULL;
   pwd->homedir = NULL;
+  pwd->gecos = NULL;
 }
 
 
@@ -1322,11 +1189,55 @@ int uv__convert_utf16_to_utf8(const WCHAR* utf16, int utf16len, char** utf8) {
 }
 
 
+/*
+ * Converts a UTF-8 string into a UTF-16 one. The resulting string is
+ * null-terminated.
+ *
+ * If utf8 is null terminated, utf8len can be set to -1, otherwise it must
+ * be specified.
+ */
+int uv__convert_utf8_to_utf16(const char* utf8, int utf8len, WCHAR** utf16) {
+  int bufsize;
+
+  if (utf8 == NULL)
+    return UV_EINVAL;
+
+  /* Check how much space we need */
+  bufsize = MultiByteToWideChar(CP_UTF8, 0, utf8, utf8len, NULL, 0);
+
+  if (bufsize == 0)
+    return uv_translate_sys_error(GetLastError());
+
+  /* Allocate the destination buffer adding an extra byte for the terminating
+   * NULL. If utf8len is not -1 MultiByteToWideChar will not add it, so
+   * we do it ourselves always, just in case. */
+  *utf16 = uv__malloc(sizeof(WCHAR) * (bufsize + 1));
+
+  if (*utf16 == NULL)
+    return UV_ENOMEM;
+
+  /* Convert to UTF-16 */
+  bufsize = MultiByteToWideChar(CP_UTF8, 0, utf8, utf8len, *utf16, bufsize);
+
+  if (bufsize == 0) {
+    uv__free(*utf16);
+    *utf16 = NULL;
+    return uv_translate_sys_error(GetLastError());
+  }
+
+  (*utf16)[bufsize] = '\0';
+  return 0;
+}
+
+
 int uv__getpwuid_r(uv_passwd_t* pwd) {
   HANDLE token;
   wchar_t username[UNLEN + 1];
   wchar_t path[MAX_PATH];
   DWORD bufsize;
+  wchar_t* gecosbuf;
+  ULONG gecos_size;
+  EXTENDED_NAME_FORMAT name_format;
   int r;
 
   if (pwd == NULL)
@@ -1336,7 +1247,7 @@ int uv__getpwuid_r(uv_passwd_t* pwd) {
   if (OpenProcessToken(GetCurrentProcess(), TOKEN_READ, &token) == 0)
     return uv_translate_sys_error(GetLastError());
 
-  bufsize = sizeof(path);
+  bufsize = ARRAY_SIZE(path);
   if (!GetUserProfileDirectoryW(token, path, &bufsize)) {
     r = GetLastError();
     CloseHandle(token);
@@ -1351,7 +1262,7 @@ int uv__getpwuid_r(uv_passwd_t* pwd) {
   CloseHandle(token);
 
   /* Get the username using GetUserNameW() */
-  bufsize = sizeof(username);
+  bufsize = ARRAY_SIZE(username);
   if (!GetUserNameW(username, &bufsize)) {
     r = GetLastError();
 
@@ -1362,18 +1273,60 @@ int uv__getpwuid_r(uv_passwd_t* pwd) {
     return uv_translate_sys_error(r);
   }
 
+  /* Set all of the pointers to NULL in case an error is encountered. */
   pwd->homedir = NULL;
+  pwd->username = NULL;
+  pwd->gecos = NULL;
+  gecosbuf = NULL;
+
+  /* Get the gecos using GetUserNameExW() */
+  gecos_size = 0;
+  /* Try using the display name first. */
+  GetUserNameExW(NameDisplay, NULL, &gecos_size);
+  if (GetLastError() == ERROR_MORE_DATA) {
+    name_format = NameDisplay;
+  } else {
+    /* NameDisplay not available, so try NameSamCompatible. */
+    GetUserNameExW(NameSamCompatible, NULL, &gecos_size);
+    if (GetLastError() == ERROR_MORE_DATA) {
+      name_format = NameSamCompatible;
+    } else {
+      /* Unsupported */
+      gecos_size = 0;
+    }
+  }
+
+  if (gecos_size > 0) {
+    gecosbuf = uv__malloc(sizeof(wchar_t) * gecos_size);
+    if (gecosbuf == NULL) {
+      r = UV_ENOMEM;
+      goto error;
+    }
+
+    if (GetUserNameExW(name_format, gecosbuf, &gecos_size) == 0) {
+      r = uv_translate_sys_error(GetLastError());
+      goto error;
+    }
+  }
+
+  /* Populate the uv_passwd_t structure. */
   r = uv__convert_utf16_to_utf8(path, -1, &pwd->homedir);
 
   if (r != 0)
-    return r;
+    goto error;
 
-  pwd->username = NULL;
   r = uv__convert_utf16_to_utf8(username, -1, &pwd->username);
 
-  if (r != 0) {
-    uv__free(pwd->homedir);
-    return r;
+  if (r != 0)
+    goto error;
+
+  if (gecosbuf != NULL) {
+    r = uv__convert_utf16_to_utf8(gecosbuf, -1, &pwd->gecos);
+
+    if (r != 0)
+      goto error;
+
+    uv__free(gecosbuf);
   }
 
   pwd->shell = NULL;
@@ -1381,9 +1334,245 @@ int uv__getpwuid_r(uv_passwd_t* pwd) {
   pwd->gid = -1;
 
   return 0;
+
+error:
+  uv__free(gecosbuf);
+  uv__free(pwd->homedir);
+  uv__free(pwd->username);
+  uv__free(pwd->gecos);
+  return r;
 }
 
 
 int uv_os_get_passwd(uv_passwd_t* pwd) {
   return uv__getpwuid_r(pwd);
+}
+
+
+int uv_os_getenv(const char* name, char* buffer, size_t* size) {
+  wchar_t var[MAX_ENV_VAR_LENGTH];
+  wchar_t* name_w;
+  DWORD bufsize;
+  size_t len;
+  int r;
+
+  if (name == NULL || buffer == NULL || size == NULL || *size == 0)
+    return UV_EINVAL;
+
+  r = uv__convert_utf8_to_utf16(name, -1, &name_w);
+
+  if (r != 0)
+    return r;
+
+  len = GetEnvironmentVariableW(name_w, var, MAX_ENV_VAR_LENGTH);
+  uv__free(name_w);
+  assert(len < MAX_ENV_VAR_LENGTH); /* len does not include the null */
+
+  if (len == 0) {
+    r = GetLastError();
+
+    if (r == ERROR_ENVVAR_NOT_FOUND)
+      return UV_ENOENT;
+
+    return uv_translate_sys_error(r);
+  }
+
+  /* Check how much space we need */
+  bufsize = WideCharToMultiByte(CP_UTF8, 0, var, -1, NULL, 0, NULL, NULL);
+
+  if (bufsize == 0) {
+    return uv_translate_sys_error(GetLastError());
+  } else if (bufsize > *size) {
+    *size = bufsize;
+    return UV_ENOBUFS;
+  }
+
+  /* Convert to UTF-8 */
+  bufsize = WideCharToMultiByte(CP_UTF8,
+                                0,
+                                var,
+                                -1,
+                                buffer,
+                                *size,
+                                NULL,
+                                NULL);
+
+  if (bufsize == 0)
+    return uv_translate_sys_error(GetLastError());
+
+  *size = bufsize - 1;
+  return 0;
+}
+
+
+int uv_os_setenv(const char* name, const char* value) {
+  wchar_t* name_w;
+  wchar_t* value_w;
+  int r;
+
+  if (name == NULL || value == NULL)
+    return UV_EINVAL;
+
+  r = uv__convert_utf8_to_utf16(name, -1, &name_w);
+
+  if (r != 0)
+    return r;
+
+  r = uv__convert_utf8_to_utf16(value, -1, &value_w);
+
+  if (r != 0) {
+    uv__free(name_w);
+    return r;
+  }
+
+  r = SetEnvironmentVariableW(name_w, value_w);
+  uv__free(name_w);
+  uv__free(value_w);
+
+  if (r == 0)
+    return uv_translate_sys_error(GetLastError());
+
+  return 0;
+}
+
+
+int uv_os_unsetenv(const char* name) {
+  wchar_t* name_w;
+  int r;
+
+  if (name == NULL)
+    return UV_EINVAL;
+
+  r = uv__convert_utf8_to_utf16(name, -1, &name_w);
+
+  if (r != 0)
+    return r;
+
+  r = SetEnvironmentVariableW(name_w, NULL);
+  uv__free(name_w);
+
+  if (r == 0)
+    return uv_translate_sys_error(GetLastError());
+
+  return 0;
+}
+
+
+int uv_os_gethostname(char* buffer, size_t* size) {
+  char buf[MAXHOSTNAMELEN + 1];
+  size_t len;
+
+  if (buffer == NULL || size == NULL || *size == 0)
+    return UV_EINVAL;
+
+  uv__once_init(); /* Initialize winsock */
+
+  if (gethostname(buf, sizeof(buf)) != 0)
+    return uv_translate_sys_error(WSAGetLastError());
+
+  buf[sizeof(buf) - 1] = '\0'; /* Null terminate, just to be safe. */
+  len = strlen(buf);
+
+  if (len >= *size) {
+    *size = len + 1;
+    return UV_ENOBUFS;
+  }
+
+  memcpy(buffer, buf, len + 1);
+  *size = len;
+  return 0;
+}
+
+
+static int uv__get_handle(uv_pid_t pid, int access, HANDLE* handle) {
+  int r;
+
+  if (pid == 0)
+    *handle = GetCurrentProcess();
+  else
+    *handle = OpenProcess(access, FALSE, pid);
+
+  if (*handle == NULL) {
+    r = GetLastError();
+
+    if (r == ERROR_INVALID_PARAMETER)
+      return UV_ESRCH;
+    else
+      return uv_translate_sys_error(r);
+  }
+
+  return 0;
+}
+
+
+int uv_os_getpriority(uv_pid_t pid, int* priority) {
+  HANDLE handle;
+  int r;
+
+  if (priority == NULL)
+    return UV_EINVAL;
+
+  r = uv__get_handle(pid, PROCESS_QUERY_LIMITED_INFORMATION, &handle);
+
+  if (r != 0)
+    return r;
+
+  r = GetPriorityClass(handle);
+
+  if (r == 0) {
+    r = uv_translate_sys_error(GetLastError());
+  } else {
+    /* Map Windows priority classes to Unix nice values. */
+    if (r == REALTIME_PRIORITY_CLASS)
+      *priority = UV_PRIORITY_HIGHEST;
+    else if (r == HIGH_PRIORITY_CLASS)
+      *priority = UV_PRIORITY_HIGH;
+    else if (r == ABOVE_NORMAL_PRIORITY_CLASS)
+      *priority = UV_PRIORITY_ABOVE_NORMAL;
+    else if (r == NORMAL_PRIORITY_CLASS)
+      *priority = UV_PRIORITY_NORMAL;
+    else if (r == BELOW_NORMAL_PRIORITY_CLASS)
+      *priority = UV_PRIORITY_BELOW_NORMAL;
+    else  /* IDLE_PRIORITY_CLASS */
+      *priority = UV_PRIORITY_LOW;
+
+    r = 0;
+  }
+
+  CloseHandle(handle);
+  return r;
+}
+
+
+int uv_os_setpriority(uv_pid_t pid, int priority) {
+  HANDLE handle;
+  int priority_class;
+  int r;
+
+  /* Map Unix nice values to Windows priority classes. */
+  if (priority < UV_PRIORITY_HIGHEST || priority > UV_PRIORITY_LOW)
+    return UV_EINVAL;
+  else if (priority < UV_PRIORITY_HIGH)
+    priority_class = REALTIME_PRIORITY_CLASS;
+  else if (priority < UV_PRIORITY_ABOVE_NORMAL)
+    priority_class = HIGH_PRIORITY_CLASS;
+  else if (priority < UV_PRIORITY_NORMAL)
+    priority_class = ABOVE_NORMAL_PRIORITY_CLASS;
+  else if (priority < UV_PRIORITY_BELOW_NORMAL)
+    priority_class = NORMAL_PRIORITY_CLASS;
+  else if (priority < UV_PRIORITY_LOW)
+    priority_class = BELOW_NORMAL_PRIORITY_CLASS;
+  else
+    priority_class = IDLE_PRIORITY_CLASS;
+
+  r = uv__get_handle(pid, PROCESS_SET_INFORMATION, &handle);
+
+  if (r != 0)
+    return r;
+
+  if (SetPriorityClass(handle, priority_class) == 0)
+    r = uv_translate_sys_error(GetLastError());
+
+  CloseHandle(handle);
+  return r;
 }

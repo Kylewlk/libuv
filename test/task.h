@@ -27,21 +27,11 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <stdlib.h>
-
-#if defined(_MSC_VER) && _MSC_VER < 1600
-# include "stdint-msvc2008.h"
-#else
-# include <stdint.h>
-#endif
+#include <stdint.h>
 
 #if !defined(_WIN32)
 # include <sys/time.h>
 # include <sys/resource.h>  /* setrlimit() */
-#endif
-
-#ifdef __clang__
-# pragma clang diagnostic ignored "-Wvariadic-macros"
-# pragma clang diagnostic ignored "-Wc99-extensions"
 #endif
 
 #define TEST_PORT 9123
@@ -58,7 +48,7 @@
 #endif
 
 #ifdef _WIN32
-# include <io.h>
+# include <sys/stat.h>
 # ifndef S_IRUSR
 #  define S_IRUSR _S_IREAD
 # endif
@@ -168,10 +158,6 @@ enum test_status {
 
 #endif
 
-#if !defined(snprintf) && defined(_MSC_VER) && _MSC_VER < 1900
-extern int snprintf(char*, size_t, const char*, ...);
-#endif
-
 #if defined(__clang__) ||                                \
     defined(__GNUC__) ||                                 \
     defined(__INTEL_COMPILER) ||                         \
@@ -179,6 +165,12 @@ extern int snprintf(char*, size_t, const char*, ...);
 # define UNUSED __attribute__((unused))
 #else
 # define UNUSED
+#endif
+
+#if defined(_WIN32)
+#define notify_parent_process() ((void) 0)
+#else
+extern void notify_parent_process(void);
 #endif
 
 /* Fully close a loop */
@@ -208,5 +200,32 @@ UNUSED static int can_ipv6(void) {
   uv_free_interface_addresses(addr, count);
   return supported;
 }
+
+#if defined(__CYGWIN__) || defined(__MSYS__)
+# define NO_FS_EVENTS "Filesystem watching not supported on this platform."
+#endif
+
+#if defined(__MSYS__)
+# define NO_SEND_HANDLE_ON_PIPE \
+  "MSYS2 runtime does not support sending handles on pipes."
+#elif defined(__CYGWIN__)
+# define NO_SEND_HANDLE_ON_PIPE \
+  "Cygwin runtime does not support sending handles on pipes."
+#endif
+
+#if defined(__MSYS__)
+# define NO_SELF_CONNECT \
+  "MSYS2 runtime hangs on listen+connect in same process."
+#elif defined(__CYGWIN__)
+# define NO_SELF_CONNECT \
+  "Cygwin runtime hangs on listen+connect in same process."
+#endif
+
+#if !defined(__linux__) && \
+    !defined(__FreeBSD__) && \
+    !defined(_WIN32)
+# define NO_CPU_AFFINITY \
+  "affinity not supported on this platform."
+#endif
 
 #endif /* TASK_H_ */

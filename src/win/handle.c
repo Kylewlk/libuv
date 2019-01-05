@@ -20,7 +20,6 @@
  */
 
 #include <assert.h>
-#include <io.h>
 #include <stdlib.h>
 
 #include "uv.h"
@@ -28,15 +27,12 @@
 #include "handle-inl.h"
 
 
-uv_handle_type uv_guess_handle(uv_file file) {
-  HANDLE handle;
+uv_handle_type uv_guess_handle(uv_os_fd_t handle) {
   DWORD mode;
 
-  if (file < 0) {
+  if (handle == INVALID_HANDLE_VALUE) {
     return UV_UNKNOWN_HANDLE;
   }
-
-  handle = uv__get_osfhandle(file);
 
   switch (GetFileType(handle)) {
     case FILE_TYPE_CHAR:
@@ -59,15 +55,15 @@ uv_handle_type uv_guess_handle(uv_file file) {
 
 
 int uv_is_active(const uv_handle_t* handle) {
-  return (handle->flags & UV__HANDLE_ACTIVE) &&
-        !(handle->flags & UV__HANDLE_CLOSING);
+  return (handle->flags & UV_HANDLE_ACTIVE) &&
+        !(handle->flags & UV_HANDLE_CLOSING);
 }
 
 
 void uv_close(uv_handle_t* handle, uv_close_cb cb) {
   uv_loop_t* loop = handle->loop;
 
-  if (handle->flags & UV__HANDLE_CLOSING) {
+  if (handle->flags & UV_HANDLE_CLOSING) {
     assert(0);
     return;
   }
@@ -97,25 +93,25 @@ void uv_close(uv_handle_t* handle, uv_close_cb cb) {
       return;
 
     case UV_TIMER:
-      uv_timer_stop((uv_timer_t*)handle);
+      uv__timer_close((uv_timer_t*)handle);
       uv__handle_closing(handle);
       uv_want_endgame(loop, handle);
       return;
 
     case UV_PREPARE:
-      uv_prepare_stop((uv_prepare_t*)handle);
+      uv__prepare_close((uv_prepare_t*) handle);
       uv__handle_closing(handle);
       uv_want_endgame(loop, handle);
       return;
 
     case UV_CHECK:
-      uv_check_stop((uv_check_t*)handle);
+      uv__check_close((uv_check_t*) handle);
       uv__handle_closing(handle);
       uv_want_endgame(loop, handle);
       return;
 
     case UV_IDLE:
-      uv_idle_stop((uv_idle_t*)handle);
+      uv__idle_close((uv_idle_t*) handle);
       uv__handle_closing(handle);
       uv_want_endgame(loop, handle);
       return;
@@ -150,5 +146,5 @@ void uv_close(uv_handle_t* handle, uv_close_cb cb) {
 
 
 int uv_is_closing(const uv_handle_t* handle) {
-  return !!(handle->flags & (UV__HANDLE_CLOSING | UV_HANDLE_CLOSED));
+  return !!(handle->flags & (UV_HANDLE_CLOSING | UV_HANDLE_CLOSED));
 }

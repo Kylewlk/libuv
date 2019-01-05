@@ -21,7 +21,9 @@ Data types
 Public members
 ^^^^^^^^^^^^^^
 
-N/A
+.. c:member:: int uv_pipe_t.ipc
+
+    Whether this pipe is suitable for handle passing between processes.
 
 .. seealso:: The :c:type:`uv_stream_t` members also apply.
 
@@ -34,7 +36,7 @@ API
     Initialize a pipe handle. The `ipc` argument is a boolean to indicate if
     this pipe will be used for handle passing between processes.
 
-.. c:function:: int uv_pipe_open(uv_pipe_t* handle, uv_file file)
+.. c:function:: int uv_pipe_open(uv_pipe_t* handle, uv_os_fd_t file)
 
     Open an existing file descriptor or HANDLE as a pipe.
 
@@ -49,16 +51,20 @@ API
     Bind the pipe to a file path (Unix) or a name (Windows).
 
     .. note::
-        Paths on Unix get truncated to ``sizeof(sockaddr_un.sun_path)`` bytes, typically between
-        92 and 108 bytes.
+        If a path on Unix exceeds ``sizeof(sockaddr_un.sun_path)`` bytes, typically between
+        92 and 108 bytes, ``uv_pipe_bind`` will fail with ``UV_ENAMETOOLONG``.
+
+    .. versionchanged: 2.0.0 long filenames will lead to an error rather than being truncated
 
 .. c:function:: void uv_pipe_connect(uv_connect_t* req, uv_pipe_t* handle, const char* name, uv_connect_cb cb)
 
     Connect to the Unix domain socket or the named pipe.
 
     .. note::
-        Paths on Unix get truncated to ``sizeof(sockaddr_un.sun_path)`` bytes, typically between
-        92 and 108 bytes.
+        If a path on Unix exceeds ``sizeof(sockaddr_un.sun_path)`` bytes, typically between
+        92 and 108 bytes, ``uv_pipe_bind`` will fail with ``UV_ENAMETOOLONG``.
+
+    .. versionchanged: 2.0.0 long filenames will lead to an error rather than being truncated
 
 .. c:function:: int uv_pipe_getsockname(const uv_pipe_t* handle, char* buffer, size_t* size)
 
@@ -102,3 +108,12 @@ API
     and call ``uv_accept(pipe, handle)``.
 
 .. seealso:: The :c:type:`uv_stream_t` API functions also apply.
+
+.. c:function:: int uv_pipe_chmod(uv_pipe_t* handle, int flags)
+
+    Alters pipe permissions, allowing it to be accessed from processes run by
+    different users. Makes the pipe writable or readable by all users. Mode can
+    be ``UV_WRITABLE``, ``UV_READABLE`` or ``UV_WRITABLE | UV_READABLE``. This
+    function is blocking.
+
+    .. versionadded:: 1.16.0

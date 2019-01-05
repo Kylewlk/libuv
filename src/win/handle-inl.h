@@ -23,7 +23,6 @@
 #define UV_WIN_HANDLE_INL_H_
 
 #include <assert.h>
-#include <io.h>
 
 #include "uv.h"
 #include "internal.h"
@@ -32,7 +31,7 @@
 #define DECREASE_ACTIVE_COUNT(loop, handle)                             \
   do {                                                                  \
     if (--(handle)->activecnt == 0 &&                                   \
-        !((handle)->flags & UV__HANDLE_CLOSING)) {                      \
+        !((handle)->flags & UV_HANDLE_CLOSING)) {                       \
       uv__handle_stop((handle));                                        \
     }                                                                   \
     assert((handle)->activecnt >= 0);                                   \
@@ -53,7 +52,7 @@
     assert(handle->reqs_pending > 0);                                   \
     handle->reqs_pending--;                                             \
                                                                         \
-    if (handle->flags & UV__HANDLE_CLOSING &&                           \
+    if (handle->flags & UV_HANDLE_CLOSING &&                            \
         handle->reqs_pending == 0) {                                    \
       uv_want_endgame(loop, (uv_handle_t*)handle);                      \
     }                                                                   \
@@ -62,14 +61,14 @@
 
 #define uv__handle_closing(handle)                                      \
   do {                                                                  \
-    assert(!((handle)->flags & UV__HANDLE_CLOSING));                    \
+    assert(!((handle)->flags & UV_HANDLE_CLOSING));                     \
                                                                         \
-    if (!(((handle)->flags & UV__HANDLE_ACTIVE) &&                      \
-          ((handle)->flags & UV__HANDLE_REF)))                          \
+    if (!(((handle)->flags & UV_HANDLE_ACTIVE) &&                       \
+          ((handle)->flags & UV_HANDLE_REF)))                           \
       uv__active_handle_add((uv_handle_t*) (handle));                   \
                                                                         \
-    (handle)->flags |= UV__HANDLE_CLOSING;                              \
-    (handle)->flags &= ~UV__HANDLE_ACTIVE;                              \
+    (handle)->flags |= UV_HANDLE_CLOSING;                               \
+    (handle)->flags &= ~UV_HANDLE_ACTIVE;                               \
   } while (0)
 
 
@@ -126,13 +125,12 @@ INLINE static void uv_process_endgames(uv_loop_t* loop) {
         break;
 
       case UV_TIMER:
-        uv_timer_endgame(loop, (uv_timer_t*) handle);
-        break;
-
       case UV_PREPARE:
       case UV_CHECK:
       case UV_IDLE:
-        uv_loop_watcher_endgame(loop, handle);
+        assert(handle->flags & UV_HANDLE_CLOSING);
+        assert(!(handle->flags & UV_HANDLE_CLOSED));
+        uv__handle_close(handle);
         break;
 
       case UV_ASYNC:
@@ -160,20 +158,6 @@ INLINE static void uv_process_endgames(uv_loop_t* loop) {
         break;
     }
   }
-}
-
-INLINE static HANDLE uv__get_osfhandle(int fd)
-{
-  /* _get_osfhandle() raises an assert in debug builds if the FD is invalid. */
-  /* But  it also correctly checks the FD and returns INVALID_HANDLE_VALUE */
-  /* for invalid FDs in release builds (or if you let the assert continue).  */
-  /* So this wrapper function disables asserts when calling _get_osfhandle. */
-
-  HANDLE handle;
-  UV_BEGIN_DISABLE_CRT_ASSERT();
-  handle = (HANDLE) _get_osfhandle(fd);
-  UV_END_DISABLE_CRT_ASSERT();
-  return handle;
 }
 
 #endif /* UV_WIN_HANDLE_INL_H_ */
